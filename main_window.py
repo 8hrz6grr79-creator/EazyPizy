@@ -82,6 +82,7 @@ class ImageCompressor(QWidget):
         self._syncing      = False
         self._active_pdf_tool = None
         self._scan_server     = None
+        self._scan_dlg        = None
         self._tray            = []   # [{"path": str, "type": "image"|"pdf"}]
         self.setup_ui()
         self.hide()
@@ -90,7 +91,14 @@ class ImageCompressor(QWidget):
         if HAS_KEYBOARD:
             def _listen():
                 try:
-                    keyboard.add_hotkey('insert', lambda: self.toggle_signal.emit())
+                    def _on_key(e):
+                        # Only trigger on real Insert key, not Numpad 0
+                        # e.name == "insert" and is_keypad=False distinguishes them
+                        if (e.event_type == "down"
+                                and e.name == "insert"
+                                and not getattr(e, "is_keypad", False)):
+                            self.toggle_signal.emit()
+                    keyboard.hook(_on_key)
                     keyboard.wait()
                 except Exception:
                     pass
@@ -1117,27 +1125,29 @@ class ImageCompressor(QWidget):
         self.activateWindow()
         self.raise_()
         self._tray_add(path)
+        # notify open dialog if present
+        if hasattr(self, '_scan_dlg') and self._scan_dlg and self._scan_dlg.isVisible():
+            self._scan_dlg.notify_received(path)
 
     def _show_scan_dialog(self):
-        dlg = ScanDialog(self._scan_server, parent=self)
-        # Position the dialog centered below the app bar
+        self._scan_dlg = ScanDialog(self._scan_server, parent=self)
+        dlg = self._scan_dlg
         dlg.adjustSize()
         app_geo = self.geometry()
         dx = app_geo.left() + (app_geo.width() - dlg.width()) // 2
         dy = app_geo.bottom() + 12
-        # Keep on screen
         screen = QApplication.primaryScreen().geometry()
         dx = max(0, min(dx, screen.width()  - dlg.width()))
         dy = max(0, min(dy, screen.height() - dlg.height()))
         dlg.move(dx, dy)
-        dlg.exec_()
-        # Update tooltip to reflect current state
+        dlg.show()   # non-blocking show
         if self._scan_server and self._scan_server.running:
             self.scan_btn.setToolTip(
                 f"📡  Active — {self._scan_server.url}\n(click to view QR / stop)"
             )
         else:
             self._scan_server = None
+            self._scan_dlg = None
             self.scan_btn.setToolTip("Scan from Phone")
 
     def closeEvent(self, e):
@@ -1155,44 +1165,45 @@ class ImageCompressor(QWidget):
 # =========================================
 
 class ScanDialog(QDialog):
-    """
-    Shows the server URL + QR code so the user can scan with their phone.
-    The server keeps running after the dialog is closed.
-    """
     def __init__(self, server, parent=None):
         super().__init__(parent)
+        self._server   = server
+        self._parent   = parent
+        self._received = 0
         self.setWindowTitle("Scan from Phone")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setModal(True)
+        self.setModal(False)   # non-modal so app stays usable
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        card = QFrame()
-        card.setStyleSheet("""
+        self._card = QFrame()
+        self._card.setStyleSheet("""
             QFrame {
                 background: #1e1e22;
                 border-radius: 20px;
                 border: 1px solid rgba(255,255,255,0.10);
             }
         """)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(28, 24, 28, 24)
-        cl.setSpacing(14)
+        cl = QVBoxLayout(self._card)
+        cl.setContentsMargins(24, 20, 24, 20)
+        cl.setSpacing(12)
 
+        # Title row
+        title_row = QHBoxLayout()
         title = QLabel("📱  Scan from Phone")
-        title.setStyleSheet("color:white; font-size:16px; font-weight:700; border:none;")
-        title.setAlignment(Qt.AlignCenter)
-        cl.addWidget(title)
+        title.setStyleSheet("color:white; font-size:15px; font-weight:700; border:none;")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet(
+            "color:#4ade80; font-size:12px; font-weight:600; border:none;")
+        title_row.addWidget(self._count_lbl)
+        cl.addLayout(title_row)
 
-        sub = QLabel(
-            "Connect your phone to the <b>same Wi-Fi</b>, then scan the QR code<br>"
-            "or open the URL in your browser."
-        )
-        sub.setStyleSheet("color:rgba(255,255,255,0.50); font-size:12px; border:none;")
-        sub.setAlignment(Qt.AlignCenter)
-        sub.setWordWrap(True)
+        sub = QLabel("Same Wi-Fi · scan QR or open URL in phone browser")
+        sub.setStyleSheet("color:rgba(255,255,255,0.40); font-size:11px; border:none;")
         cl.addWidget(sub)
 
         # QR code
@@ -1203,15 +1214,17 @@ class ScanDialog(QDialog):
             qr_pix = QPixmap()
             qr_pix.loadFromData(buf.read())
             qr_lbl = QLabel()
-            qr_lbl.setPixmap(qr_pix.scaled(220, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            qr_lbl.setPixmap(
+                qr_pix.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             qr_lbl.setAlignment(Qt.AlignCenter)
-            qr_lbl.setStyleSheet("border:none; background:white; border-radius:12px; padding:8px;")
+            qr_lbl.setStyleSheet(
+                "border:none; background:white; border-radius:12px; padding:8px;")
             cl.addWidget(qr_lbl)
         else:
-            no_qr = QLabel("📦  Install <b>qrcode</b> for QR scanning:<br>pip install qrcode[pil]")
-            no_qr.setStyleSheet("color:rgba(255,255,255,0.45); font-size:12px; border:none;")
+            no_qr = QLabel("Install qrcode:  pip install qrcode[pil]")
+            no_qr.setStyleSheet(
+                "color:rgba(255,255,255,0.40); font-size:11px; border:none;")
             no_qr.setAlignment(Qt.AlignCenter)
-            no_qr.setWordWrap(True)
             cl.addWidget(no_qr)
 
         # URL pill
@@ -1224,58 +1237,94 @@ class ScanDialog(QDialog):
             }
         """)
         ul = QHBoxLayout(url_frame)
-        ul.setContentsMargins(12, 8, 12, 8)
+        ul.setContentsMargins(10, 7, 10, 7)
         url_lbl = QLabel(server.url)
         url_lbl.setStyleSheet(
-            "color:#a5b4fc; font-size:13px; font-weight:600; border:none;"
-        )
+            "color:#a5b4fc; font-size:12px; font-weight:600; border:none;")
         url_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         url_lbl.setCursor(QCursor(Qt.IBeamCursor))
         ul.addWidget(url_lbl, 1)
         cl.addWidget(url_frame)
 
-        hint2 = QLabel("Photos sent from your phone appear here instantly.")
-        hint2.setStyleSheet("color:rgba(255,255,255,0.30); font-size:11px; border:none;")
-        hint2.setAlignment(Qt.AlignCenter)
-        cl.addWidget(hint2)
+        # Last received thumbnail (hidden until first photo)
+        self._thumb_frame = QFrame()
+        self._thumb_frame.setStyleSheet(
+            "QFrame{background:rgba(255,255,255,0.04);border-radius:10px;border:none;}")
+        self._thumb_frame.hide()
+        tl = QHBoxLayout(self._thumb_frame)
+        tl.setContentsMargins(8, 8, 8, 8)
+        tl.setSpacing(10)
+        self._thumb_lbl = QLabel()
+        self._thumb_lbl.setFixedSize(54, 54)
+        self._thumb_lbl.setStyleSheet(
+            "border-radius:8px; border:none; background:#333;")
+        self._thumb_lbl.setScaledContents(True)
+        tl.addWidget(self._thumb_lbl)
+        info_col = QVBoxLayout()
+        info_col.setSpacing(2)
+        self._thumb_name = QLabel("—")
+        self._thumb_name.setStyleSheet(
+            "color:rgba(255,255,255,0.80); font-size:11px; font-weight:600; border:none;")
+        self._thumb_status = QLabel("Waiting for photos…")
+        self._thumb_status.setStyleSheet(
+            "color:rgba(255,255,255,0.35); font-size:10px; border:none;")
+        info_col.addWidget(self._thumb_name)
+        info_col.addWidget(self._thumb_status)
+        tl.addLayout(info_col, 1)
+        cl.addWidget(self._thumb_frame)
 
         # Buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-
-        stop_btn = QPushButton("⏹  Stop Server")
+        stop_btn = QPushButton("⏹  Stop")
         stop_btn.setStyleSheet("""
             QPushButton {
-                background: rgba(248,113,113,0.15);
-                border: 1px solid rgba(248,113,113,0.30);
-                border-radius: 10px;
-                color: #f87171;
-                font-size: 13px;
-                font-weight: 600;
-                padding: 8px 16px;
+                background: rgba(248,113,113,0.12);
+                border: 1px solid rgba(248,113,113,0.25);
+                border-radius: 10px; color: #f87171;
+                font-size: 12px; font-weight: 600; padding: 8px 14px;
             }
-            QPushButton:hover { background: rgba(248,113,113,0.28); }
+            QPushButton:hover { background: rgba(248,113,113,0.25); }
         """)
         stop_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        stop_btn.clicked.connect(lambda: (server.stop(), self.accept()))
+        stop_btn.clicked.connect(self._stop)
         btn_row.addWidget(stop_btn)
 
-        ok_btn = QPushButton("Keep Running  ✓")
-        ok_btn.setStyleSheet("""
+        keep_btn = QPushButton("Keep Running  ✓")
+        keep_btn.setStyleSheet("""
             QPushButton {
-                background: #5865F2;
-                border: none;
-                border-radius: 10px;
-                color: white;
-                font-size: 13px;
-                font-weight: 600;
-                padding: 8px 16px;
+                background: #5865F2; border: none; border-radius: 10px;
+                color: white; font-size: 12px; font-weight: 600; padding: 8px 14px;
             }
             QPushButton:hover { background: #4752C4; }
         """)
-        ok_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
-
+        keep_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        keep_btn.clicked.connect(self.accept)
+        btn_row.addWidget(keep_btn)
         cl.addLayout(btn_row)
-        outer.addWidget(card)
+
+        outer.addWidget(self._card)
+
+    def notify_received(self, path: str):
+        """Call this when a photo arrives to update the dialog."""
+        self._received += 1
+        self._count_lbl.setText(f"✓ {self._received} received")
+
+        # update thumbnail
+        pix = QPixmap(path)
+        if not pix.isNull():
+            self._thumb_lbl.setPixmap(
+                pix.scaled(54, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        name = os.path.basename(path)
+        kb = os.path.getsize(path) / 1024 if os.path.exists(path) else 0
+        self._thumb_name.setText(name if len(name) <= 24 else name[:21] + "…")
+        self._thumb_status.setText(f"{kb:.0f} KB  ·  just now")
+        self._thumb_frame.show()
+
+        # auto-close after first photo
+        if self._received == 1:
+            self.accept()
+
+    def _stop(self):
+        self._server.stop()
+        self.accept()
