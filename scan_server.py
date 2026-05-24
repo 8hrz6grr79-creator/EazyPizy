@@ -22,80 +22,233 @@ _HTML = b"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
 <title>Scan to PC</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#111;color:#eee;font-family:system-ui,sans-serif;
-     display:flex;flex-direction:column;align-items:center;
-     justify-content:center;min-height:100vh;padding:24px;gap:18px}
-h1{font-size:22px;font-weight:700;color:#a5b4fc}
-p{font-size:13px;color:#888;text-align:center}
-label.pick{display:flex;align-items:center;justify-content:center;gap:10px;
-           background:#5865f2;color:#fff;font-size:16px;font-weight:600;
-           border-radius:14px;padding:16px 28px;cursor:pointer;
-           width:100%;max-width:340px}
-label.pick input{display:none}
-#preview{width:100%;max-width:340px;border-radius:14px;
-         display:none;object-fit:contain;max-height:260px}
-#send{background:#22c55e;color:#fff;border:none;border-radius:14px;
-      font-size:16px;font-weight:600;padding:16px 28px;
-      width:100%;max-width:340px;cursor:pointer;display:none}
-#send:disabled{opacity:.5;cursor:default}
-#msg{font-size:15px;color:#4ade80;text-align:center;min-height:22px}
-#err{font-size:13px;color:#f87171;text-align:center;min-height:18px}
+:root{--accent:#5865f2;--green:#22c55e;--red:#f87171;--bg:#0f0f13;--card:#1a1a20;--border:rgba(255,255,255,0.08)}
+body{background:var(--bg);color:#eee;font-family:system-ui,sans-serif;
+     min-height:100vh;padding:20px 16px 40px;display:flex;flex-direction:column;align-items:center;gap:16px}
+
+/* header */
+.header{display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:8px}
+.header .icon{font-size:40px;line-height:1}
+.header h1{font-size:20px;font-weight:700;color:#fff}
+.header p{font-size:12px;color:rgba(255,255,255,0.4);text-align:center}
+
+/* pick buttons row */
+.pick-row{display:flex;gap:10px;width:100%;max-width:360px}
+.pick-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+          gap:6px;background:var(--card);border:1px solid var(--border);border-radius:16px;
+          padding:18px 10px;cursor:pointer;transition:background .15s}
+.pick-btn:active{background:rgba(88,101,242,0.2)}
+.pick-btn .ico{font-size:28px}
+.pick-btn span{font-size:12px;color:rgba(255,255,255,0.55);font-weight:500}
+.pick-btn input{display:none}
+
+/* preview grid */
+#grid{display:none;width:100%;max-width:360px;flex-direction:column;gap:10px}
+.grid-inner{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.thumb{position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;background:#222}
+.thumb img{width:100%;height:100%;object-fit:cover}
+.thumb .rm{position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;
+           background:rgba(0,0,0,0.7);border:none;color:#fff;font-size:13px;
+           display:flex;align-items:center;justify-content:center;cursor:pointer}
+.count-bar{display:flex;justify-content:space-between;align-items:center}
+.count-bar span{font-size:12px;color:rgba(255,255,255,0.4)}
+.add-more{font-size:12px;color:var(--accent);font-weight:600;cursor:pointer;
+          background:none;border:none;padding:0}
+
+/* progress */
+#prog-wrap{display:none;width:100%;max-width:360px;flex-direction:column;gap:6px}
+.prog-file{font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;
+           overflow:hidden;text-overflow:ellipsis}
+.prog-track{height:5px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden}
+.prog-fill{height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width .1s}
+.prog-size{font-size:11px;color:rgba(255,255,255,0.3);text-align:right}
+
+/* send button */
+#send{display:none;width:100%;max-width:360px;padding:16px;background:var(--green);
+      color:#fff;border:none;border-radius:16px;font-size:16px;font-weight:700;cursor:pointer;
+      transition:opacity .15s}
+#send:disabled{opacity:.45;cursor:default}
+
+/* last preview */
+#last-wrap{display:none;width:100%;max-width:360px;flex-direction:column;gap:8px;
+           background:var(--card);border:1px solid var(--border);border-radius:16px;padding:12px}
+#last-wrap .lbl{font-size:11px;color:rgba(255,255,255,0.3);letter-spacing:.5px}
+#last-img{width:100%;max-height:160px;object-fit:contain;border-radius:10px}
+#last-name{font-size:12px;color:rgba(255,255,255,0.5);margin-top:4px}
+
+/* status */
+#msg{font-size:14px;color:var(--green);text-align:center;min-height:20px;font-weight:600}
+#err{font-size:12px;color:var(--red);text-align:center;min-height:16px}
 </style>
 </head>
 <body>
-<h1>&#128247; Scan to PC</h1>
-<p>Pick or take a photo &mdash; it lands on your PC instantly.</p>
-<label class="pick">
-  &#128247; Choose / Take Photo
-  <input type="file" accept="image/*" capture="environment" id="f" onchange="onPick(this)"/>
-</label>
-<img id="preview" alt="preview"/>
-<button id="send" onclick="upload()">&#11014; Send to PC</button>
+
+<div class="header">
+  <div class="icon">&#128247;</div>
+  <h1>Scan to PC</h1>
+  <p>Select photos or use camera &mdash; send multiple at once</p>
+</div>
+
+<!-- Pick buttons -->
+<div class="pick-row" id="pick-row">
+  <label class="pick-btn">
+    <div class="ico">&#128247;</div>
+    <span>Camera</span>
+    <input type="file" accept="image/*" capture="environment" multiple onchange="onPick(this)"/>
+  </label>
+  <label class="pick-btn">
+    <div class="ico">&#128444;</div>
+    <span>Gallery</span>
+    <input type="file" accept="image/*" multiple onchange="onPick(this)"/>
+  </label>
+</div>
+
+<!-- Preview grid -->
+<div id="grid">
+  <div class="count-bar">
+    <span id="count-lbl">0 photos selected</span>
+    <button class="add-more" onclick="document.getElementById('add-input').click()">+ Add more</button>
+    <input id="add-input" type="file" accept="image/*" multiple style="display:none" onchange="onPick(this)"/>
+  </div>
+  <div class="grid-inner" id="grid-inner"></div>
+</div>
+
+<!-- Progress -->
+<div id="prog-wrap">
+  <div class="prog-file" id="prog-file">Preparing...</div>
+  <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+  <div class="prog-size" id="prog-size"></div>
+</div>
+
+<!-- Send -->
+<button id="send" onclick="uploadAll()">&#11014; Send to PC</button>
+
+<!-- Last received preview -->
+<div id="last-wrap">
+  <div class="lbl">LAST RECEIVED</div>
+  <img id="last-img" alt="last"/>
+  <div id="last-name"></div>
+</div>
+
 <div id="msg"></div>
 <div id="err"></div>
+
 <script>
-function onPick(inp){
-  var file=inp.files[0]; if(!file) return;
-  var r=new FileReader();
-  r.onload=function(e){
-    var img=document.getElementById('preview');
-    img.src=e.target.result; img.style.display='block';
-    document.getElementById('send').style.display='block';
-    document.getElementById('msg').textContent='';
-    document.getElementById('err').textContent='';
-  };
-  r.readAsDataURL(file);
+var files = [];
+
+function onPick(inp) {
+  var picked = Array.from(inp.files);
+  picked.forEach(function(f) {
+    if (!files.find(function(x){return x.name===f.name && x.size===f.size;}))
+      files.push(f);
+  });
+  inp.value = '';
+  renderGrid();
 }
-function upload(){
-  var file=document.getElementById('f').files[0];
-  if(!file){document.getElementById('err').textContent='No file chosen.';return;}
-  var fd=new FormData();
-  fd.append('image',file,file.name);
-  var btn=document.getElementById('send');
-  btn.disabled=true;
-  document.getElementById('msg').textContent='Uploading\u2026';
-  document.getElementById('err').textContent='';
-  fetch('/upload',{method:'POST',body:fd})
-    .then(function(r){return r.json();})
-    .then(function(d){
-      btn.disabled=false;
-      if(d.ok){
-        document.getElementById('msg').textContent='\u2705 Received on PC!';
-        document.getElementById('f').value='';
-        document.getElementById('preview').style.display='none';
-        btn.style.display='none';
-      } else {
-        document.getElementById('err').textContent='Error: '+(d.error||'unknown');
+
+function renderGrid() {
+  var inner = document.getElementById('grid-inner');
+  inner.innerHTML = '';
+  files.forEach(function(f, i) {
+    var url = URL.createObjectURL(f);
+    var div = document.createElement('div');
+    div.className = 'thumb';
+    div.innerHTML = '<img src="'+url+'"/><button class="rm" onclick="removeFile('+i+')">&#10005;</button>';
+    inner.appendChild(div);
+  });
+  document.getElementById('count-lbl').textContent = files.length + ' photo' + (files.length!==1?'s':'') + ' selected';
+  document.getElementById('grid').style.display = files.length ? 'flex' : 'none';
+  document.getElementById('send').style.display = files.length ? 'block' : 'none';
+  document.getElementById('msg').textContent = '';
+  document.getElementById('err').textContent = '';
+}
+
+function removeFile(i) {
+  files.splice(i, 1);
+  renderGrid();
+}
+
+function fmtSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  return (b/1024/1024).toFixed(1) + ' MB';
+}
+
+function uploadAll() {
+  if (!files.length) return;
+  var btn = document.getElementById('send');
+  btn.disabled = true;
+  document.getElementById('err').textContent = '';
+  document.getElementById('msg').textContent = '';
+
+  var total = files.length;
+  var done = 0;
+
+  function uploadOne(i) {
+    if (i >= files.length) {
+      // all done
+      document.getElementById('prog-wrap').style.display = 'none';
+      document.getElementById('msg').textContent = '\u2705 All ' + total + ' photo' + (total!==1?'s':'') + ' received on PC!';
+      btn.disabled = false;
+      files = [];
+      renderGrid();
+      return;
+    }
+    var f = files[i];
+    var pw = document.getElementById('prog-wrap');
+    pw.style.display = 'flex';
+    document.getElementById('prog-file').textContent = (i+1) + '/' + total + '  \u2014  ' + f.name;
+    document.getElementById('prog-size').textContent = fmtSize(f.size);
+    document.getElementById('prog-fill').style.width = '0%';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/upload');
+
+    xhr.upload.onprogress = function(e) {
+      if (e.lengthComputable) {
+        var pct = Math.round(e.loaded / e.total * 100);
+        document.getElementById('prog-fill').style.width = pct + '%';
+        document.getElementById('prog-size').textContent = fmtSize(e.loaded) + ' / ' + fmtSize(e.total);
       }
-    })
-    .catch(function(e){
-      btn.disabled=false;
-      document.getElementById('err').textContent='Upload failed: '+e;
-    });
+    };
+
+    xhr.onload = function() {
+      document.getElementById('prog-fill').style.width = '100%';
+      try {
+        var d = JSON.parse(xhr.responseText);
+        if (d.ok) {
+          // show last preview
+          var lw = document.getElementById('last-wrap');
+          lw.style.display = 'flex';
+          document.getElementById('last-img').src = URL.createObjectURL(f);
+          document.getElementById('last-name').textContent = f.name + '  \u00b7  ' + fmtSize(f.size);
+          done++;
+          uploadOne(i + 1);
+        } else {
+          document.getElementById('err').textContent = 'Failed: ' + (d.error||'unknown');
+          btn.disabled = false;
+        }
+      } catch(e) {
+        document.getElementById('err').textContent = 'Server error';
+        btn.disabled = false;
+      }
+    };
+
+    xhr.onerror = function() {
+      document.getElementById('err').textContent = 'Connection failed';
+      btn.disabled = false;
+    };
+
+    var fd = new FormData();
+    fd.append('image', f, f.name);
+    xhr.send(fd);
+  }
+
+  uploadOne(0);
 }
 </script>
 </body>
