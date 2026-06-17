@@ -223,6 +223,35 @@ QFrame#panel {
 }
 """
 
+PDF_COMPACT_PANEL_STYLE = """
+QFrame#pdfCompactPanel {
+    background: #1e1e22;
+    border-radius: 18px;
+    border: 1px solid rgba(255,255,255,0.08);
+}
+QFrame#pdfToolHeader {
+    background: transparent;
+    border: none;
+}
+"""
+
+PDF_HEADER_STYLE = """
+QLabel {
+    color: rgba(255,255,255,0.88);
+    font-size: 14px;
+    font-weight: 700;
+    border: none;
+}
+"""
+
+PDF_SUBTITLE_STYLE = """
+QLabel {
+    color: rgba(255,255,255,0.42);
+    font-size: 12px;
+    border: none;
+}
+"""
+
 SIDEBAR_STYLE = """
     background: #26262b;
     border-left: 1px solid rgba(255,255,255,0.06);
@@ -255,3 +284,68 @@ QPushButton:pressed { background: rgba(88,101,242,0.30); }
 PDF_STATUS_OK  = "color: #4ade80; font-size: 12px;"
 PDF_STATUS_ERR = "color: #f87171; font-size: 12px;"
 PDF_LABEL_STYLE = "color: rgba(255,255,255,0.50); font-size: 12px;"
+
+PRESET_BTN_STYLE = """
+QPushButton {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    color: rgba(255,255,255,0.65);
+    font-size: 11px;
+    padding: 6px 10px;
+    text-align: left;
+}
+QPushButton:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.90);
+}
+QPushButton:checked {
+    background: rgba(88,101,242,0.18);
+    border: 1px solid rgba(88,101,242,0.55);
+    color: #a5b4fc;
+}
+QPushButton:pressed { background: rgba(88,101,242,0.25); }
+"""
+
+PRESET_CATEGORY_BTN_STYLE = """
+QPushButton {
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.40);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-align: left;
+    padding: 4px 0px;
+}
+QPushButton:hover { color: rgba(255,255,255,0.65); }
+"""
+
+SCROLL_AREA_STYLE = """
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 5px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: rgba(255,255,255,0.12);
+    border-radius: 2px;
+    min-height: 20px;
+}
+QScrollBar::handle:vertical:hover {
+    background: rgba(255,255,255,0.22);
+}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+"""
