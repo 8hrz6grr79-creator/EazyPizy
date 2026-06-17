@@ -17,21 +17,41 @@ PANEL_H = 500
 WIN_W   = 960
 
 # =========================================
-# ASPECT RATIOS
+# ASPECT RATIOS & CROP PRESETS
 # =========================================
 
-ASPECT_RATIOS = [
-    ("Free",   None),
-    ("1 : 1",  (1, 1)),
-    ("4 : 3",  (4, 3)),
-    ("3 : 4",  (3, 4)),
-    ("16 : 9", (16, 9)),
-    ("9 : 16", (9, 16)),
-    ("3 : 2",  (3, 2)),
-    ("2 : 3",  (2, 3)),
-    ("5 : 4",  (5, 4)),
-    ("Custom", "custom"),
+# Each entry: (label, ratio_value, preset_info)
+#   ratio_value : None (free), "custom", "sep" (separator), or (w, h) tuple
+#   preset_info : None (plain ratio), or (target_w_px, target_h_px, dpi) for
+#                 automatic resize-on-save
+CROP_PRESETS = [
+    ("Free",                      None,           None),
+    ("sep",                       "sep",          None),
+    ("Instagram Post",            (1, 1),         (1080, 1080, 72)),
+    ("Instagram Portrait",        (1080, 1350),   (1080, 1350, 72)),
+    ("Instagram Story",           (1080, 1920),   (1080, 1920, 72)),
+    ("Facebook Post",             (1200, 630),    (1200, 630, 72)),
+    ("Facebook Cover",            (1640, 624),    (1640, 624, 72)),
+    ("X / Twitter Post",          (1600, 900),    (1600, 900, 72)),
+    ("LinkedIn Post",             (1200, 627),    (1200, 627, 72)),
+    ("YouTube Thumbnail",         (1280, 720),    (1280, 720, 72)),
+    ("YouTube Banner",            (2560, 1440),   (2560, 1440, 72)),
+    ("WhatsApp Status",           (1080, 1920),   (1080, 1920, 72)),
+    ("WhatsApp DP",               (1, 1),         (500, 500, 72)),
+    ("TikTok",                    (1080, 1920),   (1080, 1920, 72)),
+    ("Pinterest Pin",             (1000, 1500),   (1000, 1500, 72)),
+    ("sep",                       "sep",          None),
+    ("Passport (India) 35×45mm",  (35, 45),       (413, 531, 300)),
+    ("Passport (US) 2×2in",       (1, 1),         (600, 600, 300)),
+    ("Visa Photo 35×45mm",        (35, 45),       (413, 531, 300)),
+    ("ID Card Photo 1:1",         (1, 1),         None),
+    ("Aadhaar Photo 35×45mm",     (35, 45),       (413, 531, 300)),
+    ("sep",                       "sep",          None),
+    ("Custom",                    "custom",       None),
 ]
+
+# Backward-compat alias (main_window still imports ASPECT_RATIOS in some paths)
+ASPECT_RATIOS = CROP_PRESETS
 
 # =========================================
 # WIDGET HELPERS
