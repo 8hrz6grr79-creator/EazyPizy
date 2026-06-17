@@ -1,10 +1,30 @@
 import os
 import io
-
-from PIL import Image
-
 from PyQt5.QtCore import QObject, pyqtSignal
 
+from PIL import Image
+import threading
+
+
+# =========================================
+# WARMUP
+# =========================================
+
+_remover_instance = None
+_remover_ready    = threading.Event()
+
+def warmup_remover():
+    global _remover_instance
+    try:
+        from transparent_background import Remover
+        _remover_instance = Remover(mode="base", device="cpu")
+        print("WARMUP OK")
+    except Exception as e:
+        print(f"WARMUP FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        _remover_ready.set()
 
 # =========================================
 # COMPRESS WORKER
@@ -51,55 +71,163 @@ class CompressWorker(QObject):
             img = bg
         elif img.mode != "RGB":
             img = img.convert("RGB")
-        tb = target_kb * 1024
+
+        tb = target_kb * 1024          # hard upper limit in bytes
         w, h = img.size
+        min_quality = 2
+        min_scale = 0.10
+
         scale = 1.0
-        for _ in range(10):
-            rs = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-            self._bsearch(rs, dst, tb)
-            if abs(os.path.getsize(dst) - tb) <= 2048 or os.path.getsize(dst) <= tb:
+        best_buf = None
+
+        for attempt in range(20):
+            nw = max(1, int(w * scale))
+            nh = max(1, int(h * scale))
+            rs = img.resize((nw, nh), Image.LANCZOS)
+
+            # Binary search for the HIGHEST quality that stays <= tb
+            buf = self._bsearch_strict(rs, tb, min_quality)
+
+            if buf is not None:
+                best_buf = buf
                 break
-            scale -= 0.07
-            if scale < 0.25:
-                break
+            else:
+                # Even min quality exceeds target — reduce dimensions
+                scale -= 0.05
+                if scale < min_scale:
+                    # Last resort: use smallest scale with min quality
+                    nw = max(1, int(w * min_scale))
+                    nh = max(1, int(h * min_scale))
+                    rs = img.resize((nw, nh), Image.LANCZOS)
+                    buf = self._bsearch_strict(rs, tb, min_quality)
+                    if buf is not None:
+                        best_buf = buf
+                    else:
+                        # Absolute fallback: save at minimum quality
+                        fallback = io.BytesIO()
+                        rs.save(fallback, "JPEG", quality=min_quality, optimize=True)
+                        best_buf = fallback.getvalue()
+                    break
+
+        if best_buf is None:
+            fallback = io.BytesIO()
+            img.save(fallback, "JPEG", quality=min_quality, optimize=True)
+            best_buf = fallback.getvalue()
+
+        with open(dst, "wb") as f:
+            f.write(best_buf)
         return os.path.getsize(dst) / 1024
 
     @staticmethod
-    def _bsearch(img, dst, tb):
-        lo, hi, best = 5, 95, 85
+    def _bsearch_strict(img, target_bytes, min_quality=2):
+        """Binary search for the highest JPEG quality where file size <= target_bytes.
+
+        Returns the JPEG bytes if a valid quality is found, or None if even
+        min_quality produces a file larger than target_bytes.
+        """
+        lo, hi = min_quality, 95
+        best_buf = None
+
+        # First check: does min quality fit?
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=lo, optimize=True)
+        if buf.tell() > target_bytes:
+            return None  # even lowest quality exceeds target
+
+        best_buf = buf.getvalue()
+
         while lo <= hi:
             mid = (lo + hi) // 2
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=mid, optimize=True)
             sz = buf.tell()
-            if abs(sz - tb) < 1024:
-                best = mid
-                break
-            elif sz > tb:
-                hi = mid - 1
-            else:
-                best = mid
+
+            if sz <= target_bytes:
+                # This quality fits — try higher quality
+                best_buf = buf.getvalue()
                 lo = mid + 1
-        img.save(dst, "JPEG", quality=best, optimize=True)
+            else:
+                # Too large — try lower quality
+                hi = mid - 1
+
+        return best_buf
 
 
 # =========================================
-# BG REMOVE WORKER
+# BG REMOVE WORKER  (offline — InSPyReNet, CPU)
 # =========================================
 
 class BgRemoveWorker(QObject):
-    finished = pyqtSignal(object)
+    finished = pyqtSignal(object, object)
     error    = pyqtSignal(str)
 
-    def __init__(self, path):
+    def __init__(self, path, remover=None):
         super().__init__()
         self.path = path
+        self.remover = remover
 
     def run(self):
         try:
-            from rembg import remove
-            img = Image.open(self.path).convert("RGBA")
-            result = remove(img)
+
+            if self.remover is None:
+                _remover_ready.wait()        # instant if warmup done, waits if still loading
+                self.remover = _remover_instance
+                if self.remover is None:     # warmup failed, load ourselves
+                    from transparent_background import Remover
+                    self.remover = Remover(mode="base", device="cpu")
+
+            remover = self.remover
+
+            orig = Image.open(self.path).convert("RGB")
+
+            # Downscale for fast preview display only — full-size processed on save
+            MAX_PREVIEW = 1200
+            preview = orig.copy()
+            if max(preview.size) > MAX_PREVIEW:
+                preview.thumbnail((MAX_PREVIEW, MAX_PREVIEW), Image.LANCZOS)
+
+            result = remover.process(preview, type="rgba")
+
+            self.finished.emit(result, remover)
+
+        except ImportError as e:
+            self.error.emit(
+                f"Missing dependency: {e}\n"
+                "Run:  pip install transparent-background"
+            )
+        except Exception as ex:
+            self.error.emit(str(ex))
+
+
+# =========================================
+# BG REMOVE SAVE WORKER  (full-resolution export)
+# =========================================
+
+class BgRemoveSaveWorker(QObject):
+    """
+    Re-runs background removal at full original resolution for export.
+    Uses the already-loaded remover so the model is not reloaded.
+    """
+    finished = pyqtSignal(object)   # emits full-size RGBA PIL
+    error    = pyqtSignal(str)
+
+    def __init__(self, path, remover, bg_color=None):
+        super().__init__()
+        self.path     = path
+        self.remover  = remover
+        self.bg_color = bg_color   # QColor or None
+
+    def run(self):
+        try:
+            orig   = Image.open(self.path).convert("RGB")
+            result = self.remover.process(orig, type="rgba")
+            if self.bg_color is not None:
+                from PIL import Image as _Image
+                bg = _Image.new("RGBA", result.size,
+                                (self.bg_color.red(), self.bg_color.green(),
+                                 self.bg_color.blue(), 255))
+                bg.paste(result, mask=result.split()[3])
+                result = bg.convert("RGB")
             self.finished.emit(result)
         except Exception as ex:
             self.error.emit(str(ex))
