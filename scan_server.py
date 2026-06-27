@@ -203,7 +203,7 @@ body{
   <label class="pick-btn">
     <div class="ico">&#128196;</div>
     <span>File</span>
-    <input type="file" multiple onchange="onPick(this)"/>
+    <input type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" multiple onchange="onPick(this)"/>
   </label>
 </div>
 
@@ -271,8 +271,14 @@ function sendText() {
 }
 
 // ── files ─────────────────────────────────────────────────────────────────
+var MAX_BYTES = 500 * 1024 * 1024;
+
 function onPick(inp) {
+  var skipped = 0;
+  var blocked = 0;
   Array.from(inp.files).forEach(function(f) {
+    if (f.type.startsWith('video/')) { blocked++; return; }
+    if (f.size > MAX_BYTES) { skipped++; return; }
     if (!queue.find(function(x){ return x.file.name===f.name && x.file.size===f.size; })) {
       var isImg = f.type.startsWith('image/');
       queue.push({file: f, isImage: isImg});
@@ -281,6 +287,13 @@ function onPick(inp) {
   inp.value = '';
   renderQueue();
   clearFeedback();
+  if (blocked > 0) {
+    document.getElementById('err').textContent =
+      blocked + ' video file' + (blocked!==1?'s':'') + ' not allowed \u2014 only images, text & docs';
+  } else if (skipped > 0) {
+    document.getElementById('err').textContent =
+      skipped + ' file' + (skipped!==1?'s':'') + ' skipped \u2014 max 500 MB per file';
+  }
 }
 
 function renderQueue() {
@@ -478,6 +491,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         self._json({"ok": True})
 
+    _MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+
     # -- /upload -------------------------------------------------------------
     def _handle_upload(self):
         env = {
@@ -485,7 +500,13 @@ class _Handler(BaseHTTPRequestHandler):
             "CONTENT_TYPE":   self.headers.get("Content-Type", ""),
             "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
         }
-        body_len  = int(env["CONTENT_LENGTH"])
+        body_len = int(env["CONTENT_LENGTH"])
+
+        if body_len > self._MAX_UPLOAD_BYTES:
+            self._json({"ok": False,
+                        "error": f"File too large — max 500 MB"}, 413)
+            return
+
         body_data = self.rfile.read(body_len)
 
         try:
@@ -521,6 +542,13 @@ class _Handler(BaseHTTPRequestHandler):
         ext = os.path.splitext(filename)[1].lower()
         if not ext:
             ext = ".bin"
+
+        _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv",
+                       ".wmv", ".m4v", ".3gp", ".mpeg", ".mpg"}
+        if ext in _VIDEO_EXTS:
+            self._json({"ok": False,
+                        "error": "Video files are not allowed — only images, text & docs"}, 415)
+            return
 
         os.makedirs(self.save_dir, exist_ok=True)
         unique   = f"scan_{uuid.uuid4().hex[:8]}{ext}"
