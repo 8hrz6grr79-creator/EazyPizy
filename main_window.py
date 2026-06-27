@@ -29,12 +29,12 @@ from PyQt5.QtWidgets import (
     QScrollArea
 )
 from PyQt5.QtCore import (
-    Qt, QPoint, QSize, QPointF, QRectF,
+    Qt, QPoint, QSize, QPointF, QRect, QRectF,
     QPropertyAnimation, QEasingCurve,
     pyqtSignal, pyqtSlot, QThread, QMetaObject, Q_ARG,
     QTimer
 )
-from PyQt5.QtGui import QColor, QIcon, QPixmap, QCursor, QPainter, QPen, QBrush, QLinearGradient, QPainterPath
+from PyQt5.QtGui import QColor, QIcon, QPixmap, QCursor, QPainter, QPen, QBrush, QLinearGradient, QFont, QFontMetrics
 
 from scan_server import ScanServer
 
@@ -53,6 +53,7 @@ from helpers import (
     sep_widget, section_label, spin_col
 )
 from canvases import CropCanvas, BgCanvas
+from pdf_canvas import PdfDropCanvas  # used by pdf_panel
 from pdf_panel import PdfToolPanel
 from workers import CompressWorker, BgRemoveWorker, warmup_remover
 
@@ -286,188 +287,6 @@ class _AlphaBar(QWidget):
 
 
 # =========================================
-# ROTATION RULER  — scrolling tick-mark scrubber
-# =========================================
-
-class RotationRuler(QWidget):
-    """
-    A horizontal scrubbing ruler used as the crop-tool rotation control.
-    Styled like a small measuring-tape ruler: thin tick marks of varying
-    length scroll past a fixed brand-coloured centre indicator as the user
-    drags left / right, with degree labels at major intervals.
-    Intentionally API-compatible with QSlider so that existing handlers
-    (_on_rotate_slider, _flip_crop_h, …) work unchanged.
-    """
-    valueChanged = pyqtSignal(int)   # emitted with int degrees, -180 … 180
-
-    _PPD  = 5.0    # pixels per degree (compact)
-    _FADE = 36     # px fade margin at each edge
-    _SNAP_POINTS = (-180, -135, -90, -45, 0, 45, 90, 135, 180)
-    _SNAP_DEG    = 3.0   # magnet pull radius, in degrees
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._value      = 0.0   # float for sub-degree smoothness
-        self._range_min  = -180
-        self._range_max  =  180
-        self._drag_x     = None
-        self._drag_val   = 0.0
-        self.setFixedHeight(32)
-        self.setCursor(QCursor(Qt.SizeHorCursor))
-        self.setMouseTracking(True)
-
-    # ── QSlider-compatible API ──────────────────────────────────────────
-
-    def value(self):
-        return int(round(self._value))
-
-    def setValue(self, v):
-        v = float(max(self._range_min, min(self._range_max, v)))
-        if v == self._value:
-            return
-        old_int    = int(round(self._value))
-        self._value = v
-        self.update()
-        if not self.signalsBlocked() and int(round(v)) != old_int:
-            self.valueChanged.emit(int(round(v)))
-
-    def setRange(self, lo, hi):
-        self._range_min = lo
-        self._range_max = hi
-
-    # ── Paint ───────────────────────────────────────────────────────────
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h   = self.width(), self.height()
-        ppd    = self._PPD
-        cx     = w / 2.0
-        fade   = self._FADE
-        mid_y  = h / 2.0
-
-        # ── Horizontal centre track line ──────────────────────────────────
-        track_grad = QLinearGradient(0, 0, w, 0)
-        track_grad.setColorAt(0.00, QColor(255, 255, 255,  0))
-        track_grad.setColorAt(0.15, QColor(255, 255, 255, 22))
-        track_grad.setColorAt(0.50, QColor(255, 255, 255, 40))
-        track_grad.setColorAt(0.85, QColor(255, 255, 255, 22))
-        track_grad.setColorAt(1.00, QColor(255, 255, 255,  0))
-        p.setPen(QPen(QBrush(track_grad), 1.0))
-        p.drawLine(QPointF(0, mid_y), QPointF(w, mid_y))
-
-        # ── Ticks ─────────────────────────────────────────────────────────
-        half = cx / ppd + 3
-        lo   = int(self._value - half)
-        hi   = int(self._value + half) + 1
-
-        is_snapped = self._value in self._SNAP_POINTS
-
-        for deg in range(lo, hi + 1):
-            x = cx + (deg - self._value) * ppd
-
-            dist_edge = min(x, w - x)
-            opacity   = min(1.0, dist_edge / fade)
-            if opacity <= 0:
-                continue
-
-            is_snap_tick = (deg % 45 == 0)
-            is_major     = (deg % 15 == 0)
-            is_minor5    = (deg % 5  == 0)
-
-            if is_snap_tick:
-                tick_len = 18
-                color    = QColor(139, 148, 255, int(230 * opacity))  # indigo accent
-                width    = 2.5
-            elif is_major:
-                tick_len = 11
-                color    = QColor(255, 255, 255, int(160 * opacity))
-                width    = 1.5
-            elif is_minor5:
-                tick_len = 7
-                color    = QColor(255, 255, 255, int(90 * opacity))
-                width    = 1.2
-            else:
-                tick_len = 4
-                color    = QColor(255, 255, 255, int(50 * opacity))
-                width    = 1.0
-
-            pen = QPen(color, width)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
-            p.drawLine(QPointF(x, mid_y - tick_len / 2.0),
-                       QPointF(x, mid_y + tick_len / 2.0))
-
-        # ── Edge vignette (left & right fade overlay) ─────────────────────
-        for side in (0, 1):
-            vg = QLinearGradient(0 if side == 0 else w, 0,
-                                 fade * 1.2 if side == 0 else w - fade * 1.2, 0)
-            vg.setColorAt(0.0, QColor(30, 30, 34, 200))
-            vg.setColorAt(1.0, QColor(30, 30, 34,   0))
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(vg))
-            p.drawRect(0 if side == 0 else int(w - fade * 1.2),
-                       0, int(fade * 1.2), h)
-
-        # ── Centre indicator — glowing accent pill ─────────────────────────
-        glow_color = QColor(130, 140, 255, 60) if not is_snapped else QColor(100, 220, 150, 70)
-        accent     = QColor(180, 190, 255, 255) if not is_snapped else QColor(110, 240, 170, 255)
-
-        # Outer glow
-        for gw, ga in ((7, 18), (5, 35), (3, 60)):
-            pen = QPen(QColor(glow_color.red(), glow_color.green(),
-                              glow_color.blue(), ga), gw)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
-            p.drawLine(QPointF(cx, mid_y - 12), QPointF(cx, mid_y + 12))
-
-        # Inner bright line
-        pen = QPen(accent, 2.5)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        p.drawLine(QPointF(cx, mid_y - 13), QPointF(cx, mid_y + 13))
-
-
-    # ── Mouse interaction ────────────────────────────────────────────────
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._drag_x   = e.x()
-            self._drag_val = self._value
-
-    def mouseMoveEvent(self, e):
-        if self._drag_x is None:
-            return
-        dx       = e.x() - self._drag_x
-        new_val  = self._drag_val - dx / self._PPD
-        new_val  = max(self._range_min, min(self._range_max, new_val))
-
-        # Magnet effect — snap toward 0° / ±90° / ±180° when close
-        for snap in self._SNAP_POINTS:
-            if abs(new_val - snap) <= self._SNAP_DEG:
-                new_val = float(snap)
-                break
-
-        # Only repaint + signal when position changed by at least 0.5 px
-        if abs(new_val - self._value) < 0.5 / self._PPD:
-            return
-        old_int     = int(round(self._value))
-        self._value = new_val
-        self.update()
-        new_int = int(round(new_val))
-        if new_int != old_int and not self.signalsBlocked():
-            self.valueChanged.emit(new_int)
-
-    def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._drag_x = None
-
-    def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self.setValue(0)
-
-
-# =========================================
 # MAIN WINDOW
 # =========================================
 
@@ -510,8 +329,8 @@ class ImageCompressor(QWidget):
         self._tray            = []   # [{"path": str, "type": "image"|"pdf"}]
         self._bg_sidebar_rel  = None   # QPoint: sidebar pos relative to main window top-left
         self._drag_reset_sidebar = False  # True once sidebar has been reset for current drag
+        self.hide()          # hide before setup_ui so processEvents() never shows it
         self.setup_ui()
-        self.hide()
         self.toggle_signal.connect(self.toggle_visibility)
         self.bg_remover = None
         # Delay warmup by 5s so it does not compete with app launch or first Insert show
@@ -573,10 +392,17 @@ class ImageCompressor(QWidget):
         self._build_hint()
         self._build_progress()
         self._build_compress_list()
+        self._build_compress_canvas()
         self._build_crop_panel()
         self._build_pdf_tool_panels()
 
         QApplication.processEvents()
+
+        # Initial mode is compress — show hint only; drop zone appears when files are added
+        self.compress_canvas.hide()
+        self.compress_controls.show()
+        self.hint.show()
+        self.update_hint()
         self.resize(WIN_W, self.bar.sizeHint().height() or 80)
 
     def _build_bar(self):
@@ -648,7 +474,8 @@ class ImageCompressor(QWidget):
         kbl.addWidget(ki)
         self.kb_input = QLineEdit()
         self.kb_input.setPlaceholderText("Target KB")
-        self.kb_input.setFixedWidth(65)
+        self.kb_input.setToolTip("Default target KB for all files")
+        self.kb_input.setFixedWidth(75)
         self.kb_input.setAlignment(Qt.AlignCenter)
         self.kb_input.setStyleSheet(KB_INPUT_STYLE)
         kbl.addWidget(self.kb_input)
@@ -666,9 +493,16 @@ class ImageCompressor(QWidget):
         ccl.addWidget(self.compress_btn)
         bl.addWidget(self.compress_controls)
 
-        # Hidden aspect ratio combo — not shown in bar but drives _on_bar_ratio logic
+        # Crop bar controls
+        self.crop_bar_controls = QFrame()
+        self.crop_bar_controls.setStyleSheet("background:transparent; border:none;")
+        cbl = QHBoxLayout(self.crop_bar_controls)
+        cbl.setContentsMargins(0, 0, 0, 0)
+        cbl.setSpacing(5)
         self.bar_ratio_combo = QComboBox()
-        self.bar_ratio_combo.hide()
+        self.bar_ratio_combo.setFixedHeight(48)
+        self.bar_ratio_combo.setMinimumWidth(180)
+        self.bar_ratio_combo.setStyleSheet(COMBO_STYLE)
         for label, ratio, preset in CROP_PRESETS:
             if ratio == "sep":
                 self.bar_ratio_combo.insertSeparator(self.bar_ratio_combo.count())
@@ -677,20 +511,22 @@ class ImageCompressor(QWidget):
                 idx = self.bar_ratio_combo.count() - 1
                 self.bar_ratio_combo.setItemData(idx, (ratio, preset))
         self.bar_ratio_combo.currentIndexChanged.connect(self._on_bar_ratio)
-
-        # Crop bar controls
-        self.crop_bar_controls = QFrame()
-        self.crop_bar_controls.setStyleSheet("background:transparent; border:none;")
-        cbl = QHBoxLayout(self.crop_bar_controls)
-        cbl.setContentsMargins(0, 0, 0, 0)
-        cbl.setSpacing(5)
-        self.crop_save_btn = QPushButton("Crop")
+        cbl.addWidget(self.bar_ratio_combo)
+        cbl.addWidget(make_divider())
+        self.crop_save_btn = QPushButton("✂  Crop & Save")
         self.crop_save_btn.setFixedHeight(48)
         self.crop_save_btn.setMinimumWidth(130)
         self.crop_save_btn.setStyleSheet(ACTION_BTN_STYLE)
         self.crop_save_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.crop_save_btn.clicked.connect(self._do_crop_save)
         cbl.addWidget(self.crop_save_btn)
+        self.crop_reset_btn = QPushButton("↺")
+        self.crop_reset_btn.setFixedSize(48, 48)
+        self.crop_reset_btn.setToolTip("Reset crop")
+        self.crop_reset_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.crop_reset_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.crop_reset_btn.clicked.connect(self._reset_crop)
+        cbl.addWidget(self.crop_reset_btn)
         self.crop_bar_controls.hide()
         bl.addWidget(self.crop_bar_controls)
 
@@ -738,6 +574,10 @@ class ImageCompressor(QWidget):
         bl.addWidget(self.pdf_bar_controls)
 
         bl.addSpacing(8)
+        self.crop_dim_lbl = QLabel("")
+        self.crop_dim_lbl.setStyleSheet("color:rgba(255,255,255,0.28); font-size:12px;")
+        self.crop_dim_lbl.hide()
+        bl.addWidget(self.crop_dim_lbl)
 
         # Right-side icon buttons
         bl.addWidget(make_divider())
@@ -883,19 +723,23 @@ class ImageCompressor(QWidget):
         self.list_frame.hide()
         for p in self._pdf_panels.values():
             p.hide()
+        self.crop_dim_lbl.hide()
         self.hint.show()
         self.update_hint()
         self._animate_size(self.bar.height() or 80)
 
     def _tray_send(self, path: str, ftype: str):
         """Route a tray file to whatever tool is currently active."""
-        if self.mode == self.MODE_COMPRESS and ftype == "image":
+        if self.mode == self.MODE_COMPRESS and ftype in ("image", "pdf"):
             if path not in self.files:
                 self.files.append(path)
-                kb = os.path.getsize(path) / 1024
-                self.file_list.addItem(f"○  {os.path.basename(path)}   ·   {kb:.0f} KB")
                 self.update_hint()
-            self._show_compress_list()
+                # Sync canvas
+                self.compress_canvas.add_files([path])
+            # Reveal the drop zone now that we have at least one file
+            self.hint.hide()
+            self.compress_canvas.show()
+            self._animate_size((self.bar.height() or 80) + 10 + self.compress_canvas.preferred_height())
         elif self.mode == self.MODE_CROP and ftype == "image":
             self._load_crop_image(path)
         elif self.mode == self.MODE_BGREMOVE and ftype == "image":
@@ -943,193 +787,159 @@ class ImageCompressor(QWidget):
         lfl.addWidget(header)
         self.file_list = QListWidget()
         self.file_list.setStyleSheet(LIST_WIDGET_STYLE)
-        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.file_list.customContextMenuRequested.connect(self._compress_item_menu)
         lfl.addWidget(self.file_list)
         self._outer.addWidget(self.list_frame)
+
+    def _build_compress_canvas(self):
+        self.compress_canvas = _CompressDropZone(parent=self)
+        self.compress_canvas.browse_clicked.connect(self.add_files)
+        self.compress_canvas.file_removed.connect(self._on_compress_canvas_remove)
+        self.compress_canvas.hide()
+        self._outer.addWidget(self.compress_canvas)
 
     def _build_crop_panel(self):
         self.crop_panel = QFrame()
         self.crop_panel.setObjectName("panel")
         self.crop_panel.setStyleSheet(PANEL_STYLE)
         self.crop_panel.setFixedHeight(PANEL_H)
-        self.crop_panel.setFixedWidth(WIN_W)
         self.crop_panel.hide()
-
-        # Outer: canvas on top, bottom toolbar below
-        layout = QVBoxLayout(self.crop_panel)
+        layout = QHBoxLayout(self.crop_panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Active preset tracking
-        self._active_preset = None
-
-        # ── Canvas (centred, fixed width to match bg-remover aesthetics) ──
-        canvas_row = QHBoxLayout()
-        canvas_row.setContentsMargins(0, 0, 0, 0)
-        canvas_row.setSpacing(0)
         self.crop_canvas = CropCanvas()
-        self.crop_canvas.setFixedWidth(WIN_W)
         self.crop_canvas.crop_changed.connect(self._on_crop_changed)
-        self.crop_canvas.setToolTip(
-            "Drag the image or use the arrow keys to move image in crop region"
-        )
-        canvas_row.addStretch(1)
-        canvas_row.addWidget(self.crop_canvas)
-        canvas_row.addStretch(1)
-        layout.addLayout(canvas_row, 1)
+        layout.addWidget(self.crop_canvas, 1)
 
-        # ── Bottom toolbar ──────────────────────────────────────────────
-        bottom = QFrame()
-        bottom.setFixedHeight(122)
-        bottom.setStyleSheet(
-            "background: transparent;"
-            "border-top: 1px solid rgba(255,255,255,0.06);"
-        )
-        bl = QVBoxLayout(bottom)
-        bl.setContentsMargins(6, 8, 6, 10)
-        bl.setSpacing(4)
+        # --- Active preset tracking ---
+        self._active_preset = None   # (name, w, h, dpi) or None
 
-        # Angle label centred above the ruler
-        self.rotate_angle_lbl = QLabel("0 °")
-        self.rotate_angle_lbl.setAlignment(Qt.AlignCenter)
-        self.rotate_angle_lbl.setStyleSheet(
-            "color: rgba(255,255,255,0.80); font-size: 13px;"
-            "font-weight: 600; border: none;"
-        )
-        bl.addWidget(self.rotate_angle_lbl)
+        # --- Sidebar ---
+        sb = QFrame()
+        sb.setFixedWidth(190)
+        sb.setStyleSheet(SIDEBAR_STYLE)
+        sbl = QVBoxLayout(sb)
+        sbl.setContentsMargins(14, 18, 14, 18)
+        sbl.setSpacing(12)
 
-        # Rotation ruler
-        self.rotate_slider = RotationRuler()
+        # --- Image info ---
+        self.crop_img_info = QLabel("—")
+        self.crop_img_info.setStyleSheet("color:rgba(255,255,255,0.28); font-size:11px; border:none;")
+        sbl.addWidget(self.crop_img_info)
+        sbl.addWidget(sep_widget())
+        sbl.addWidget(section_label("Transform"))
+
+        # --- Rotation slider ---
+        rot_header = QHBoxLayout()
+        rot_lbl = QLabel("Rotate")
+        rot_lbl.setStyleSheet("color:rgba(255,255,255,0.45); font-size:11px; border:none;")
+        rot_header.addWidget(rot_lbl)
+        rot_header.addStretch()
+        self.rotate_angle_lbl = QLabel("0°")
+        self.rotate_angle_lbl.setStyleSheet("color:rgba(255,255,255,0.70); font-size:11px; border:none; font-weight:600;")
+        rot_header.addWidget(self.rotate_angle_lbl)
+        self.rotate_reset_btn = QPushButton("")
+        self.rotate_reset_btn.setIcon(QIcon(os.path.join("assets", "icons", "reset_rotate.png")))
+        self.rotate_reset_btn.setIconSize(QSize(16, 16))
+        self.rotate_reset_btn.setFixedSize(22, 22)
+        self.rotate_reset_btn.setToolTip("Reset rotation")
+        self.rotate_reset_btn.setStyleSheet("""
+            QPushButton { background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.10);
+                          border-radius:6px; color:rgba(255,255,255,0.55); font-size:12px; }
+            QPushButton:hover { background:rgba(255,255,255,0.14); color:white; }
+        """)
+        self.rotate_reset_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.rotate_reset_btn.clicked.connect(self._reset_rotation)
+        rot_header.addWidget(self.rotate_reset_btn)
+        sbl.addLayout(rot_header)
+
+        self.rotate_slider = QSlider(Qt.Horizontal)
         self.rotate_slider.setRange(-180, 180)
+        self.rotate_slider.setValue(0)
+        self.rotate_slider.setTickInterval(45)
+        self.rotate_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: rgba(255,255,255,0.10);
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #5865F2;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 14px; height: 14px;
+                margin: -5px 0;
+                background: white;
+                border-radius: 7px;
+            }
+        """)
         self.rotate_slider.valueChanged.connect(self._on_rotate_slider)
-        bl.addWidget(self.rotate_slider)
+        sbl.addWidget(self.rotate_slider)
 
-        # ── Action-button row ───────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(6)
+        sbl.addWidget(sep_widget())
 
-        # Left: Rotate CCW / CW
-        _icon_btn_style = """
-            QPushButton {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.10);
-                border-radius: 10px;
-            }
-            QPushButton:hover  { background: rgba(255,255,255,0.12); }
-            QPushButton:pressed{ background: rgba(255,255,255,0.18); }
-        """
-        _lbl_style = "color: rgba(255,255,255,0.38); font-size: 9px; border: none;"
-
-        def _btn_col(symbol, label_text, size=20):
-            col = QVBoxLayout()
-            col.setContentsMargins(0, 0, 0, 0)
-            col.setSpacing(0)
-            col.setAlignment(Qt.AlignHCenter)
-            btn = QPushButton(symbol)
-            btn.setFixedSize(40, 40)
-            btn.setStyleSheet(_icon_btn_style + f"QPushButton {{ font-size: {size}px; color: rgba(255,255,255,0.80); }}")
-            btn.setCursor(QCursor(Qt.PointingHandCursor))
-            col.addWidget(btn)
-            return col, btn
-
-        ccw_col, self.rot90_ccw_btn = _btn_col("↺", "CCW")
+        # --- Rotate 90° buttons ---
+        rot90_row = QHBoxLayout()
+        rot90_row.setSpacing(5)
+        self.rot90_ccw_btn = QPushButton(" 90° CCW")
+        self.rot90_ccw_btn.setIcon(QIcon(os.path.join("assets", "icons", "rotate_ccw.png")))
+        self.rot90_ccw_btn.setIconSize(QSize(20, 20))
         self.rot90_ccw_btn.setToolTip("Rotate 90° counter-clockwise")
+        self.rot90_ccw_btn.setFixedHeight(30)
+        self.rot90_ccw_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.rot90_ccw_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.rot90_ccw_btn.clicked.connect(self._rotate_90_ccw)
-        btn_row.addLayout(ccw_col)
-
-        cw_col, self.rot90_cw_btn = _btn_col("↻", "CW")
+        rot90_row.addWidget(self.rot90_ccw_btn)
+        self.rot90_cw_btn = QPushButton(" 90° CW")
+        self.rot90_cw_btn.setIcon(QIcon(os.path.join("assets", "icons", "rotate_cw.png")))
+        self.rot90_cw_btn.setIconSize(QSize(20, 20))
         self.rot90_cw_btn.setToolTip("Rotate 90° clockwise")
+        self.rot90_cw_btn.setFixedHeight(30)
+        self.rot90_cw_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.rot90_cw_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.rot90_cw_btn.clicked.connect(self._rotate_90_cw)
-        btn_row.addLayout(cw_col)
+        rot90_row.addWidget(self.rot90_cw_btn)
+        sbl.addLayout(rot90_row)
 
-        btn_row.addStretch(1)
+        # --- Flip buttons ---
+        flip_row = QHBoxLayout()
+        flip_row.setSpacing(5)
+        self.flip_h_btn = QPushButton("")
+        self.flip_h_btn.setIcon(QIcon(os.path.join("assets", "icons", "flip_h.png")))
+        self.flip_h_btn.setIconSize(QSize(28, 28))
+        self.flip_h_btn.setToolTip("Flip horizontally (mirror)")
+        self.flip_h_btn.setFixedHeight(30)
+        self.flip_h_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.flip_h_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.flip_h_btn.clicked.connect(self._flip_crop_h)
+        flip_row.addWidget(self.flip_h_btn)
+        self.flip_v_btn = QPushButton("")
+        self.flip_v_btn.setIcon(QIcon(os.path.join("assets", "icons", "flip_v.png")))
+        self.flip_v_btn.setIconSize(QSize(28, 28))
+        self.flip_v_btn.setToolTip("Flip vertically")
+        self.flip_v_btn.setFixedHeight(30)
+        self.flip_v_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.flip_v_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.flip_v_btn.clicked.connect(self._flip_crop_v)
+        flip_row.addWidget(self.flip_v_btn)
+        sbl.addLayout(flip_row)
 
-        # Centre: ratio selector button + auto-crop button (side by side)
-        _centre_row = QHBoxLayout()
-        _centre_row.setContentsMargins(0, 0, 0, 0)
-        _centre_row.setSpacing(6)
-
-        self._ratio_btn = QPushButton()
-        self._ratio_btn.setFixedHeight(40)
-        self._ratio_btn.setMinimumWidth(110)
-        _ratio_icon = os.path.join("assets", "icons", "crop.png")
-        if os.path.exists(_ratio_icon):
-            self._ratio_btn.setIcon(QIcon(_ratio_icon))
-            self._ratio_btn.setIconSize(QSize(18, 18))
-        self._ratio_btn.setText("  Free")
-        self._ratio_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.10);
-                border-radius: 10px;
-                color: rgba(255,255,255,0.75);
-                font-size: 13px;
-                font-weight: 500;
-                padding: 0px 14px;
-            }
-            QPushButton:hover  { background: rgba(255,255,255,0.10); color: white; }
-            QPushButton:pressed{ background: rgba(255,255,255,0.14); }
-        """)
-        self._ratio_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self._ratio_btn.clicked.connect(self._show_ratio_menu)
-        _centre_row.addWidget(self._ratio_btn)
-
-        self.auto_crop_btn = QPushButton()
-        self.auto_crop_btn.setFixedHeight(40)
-        self.auto_crop_btn.setMinimumWidth(100)
-        self.auto_crop_btn.setToolTip("Auto-detect subject and position crop box")
-        _auto_crop_icon = os.path.join("assets", "icons", "auto_crop.png")
-        if os.path.exists(_auto_crop_icon):
-            self.auto_crop_btn.setIcon(QIcon(_auto_crop_icon))
-            self.auto_crop_btn.setIconSize(QSize(18, 18))
-        self.auto_crop_btn.setText("  Auto Crop")
-        self.auto_crop_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.10);
-                border-radius: 10px;
-                color: rgba(255,255,255,0.75);
-                font-size: 13px;
-                font-weight: 500;
-                padding: 0px 14px;
-            }
-            QPushButton:hover  { background: rgba(255,255,255,0.10); color: white; }
-            QPushButton:pressed{ background: rgba(255,255,255,0.14); }
-        """)
+        # --- Auto Crop button ---
+        sbl.addWidget(sep_widget())
+        sbl.addWidget(section_label("Smart Crop"))
+        self.auto_crop_btn = QPushButton("  Auto Crop")
+        self.auto_crop_btn.setIcon(QIcon(os.path.join("assets", "icons", "auto_crop.png")))
+        self.auto_crop_btn.setIconSize(QSize(22, 22))
+        self.auto_crop_btn.setToolTip("AI-powered auto crop — detects faces, subjects, and important regions")
+        self.auto_crop_btn.setFixedHeight(32)
+        self.auto_crop_btn.setStyleSheet(SECONDARY_BTN_STYLE)
         self.auto_crop_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.auto_crop_btn.clicked.connect(self._auto_crop)
-        _centre_row.addWidget(self.auto_crop_btn)
+        sbl.addWidget(self.auto_crop_btn)
 
-        btn_row.addLayout(_centre_row)
-
-        btn_row.addStretch(1)
-
-        # Right: Flip H / V
-        fliph_col, self.flip_h_btn = _btn_col("⇆", "Mirror", 18)
-        self.flip_h_btn.setToolTip("Flip horizontally (mirror)")
-        self.flip_h_btn.clicked.connect(self._flip_crop_h)
-        btn_row.addLayout(fliph_col)
-
-        flipv_col, self.flip_v_btn = _btn_col("⇅", "Invert", 18)
-        self.flip_v_btn.setToolTip("Flip vertically")
-        self.flip_v_btn.clicked.connect(self._flip_crop_v)
-        btn_row.addLayout(flipv_col)
-
-        bl.addLayout(btn_row)
-        layout.addWidget(bottom)
-
-        # ── Hidden/compat widgets (handlers still reference these) ──────
-        # crop_img_info is updated in several handlers — keep it alive but invisible
-        self.crop_img_info = QLabel("")
-        self.crop_img_info.hide()
-        # rotate_reset_btn — double-click the ruler resets; keep a hidden stub
-        self.rotate_reset_btn = QPushButton()
-        self.rotate_reset_btn.hide()
-        self.rotate_reset_btn.clicked.connect(self._reset_rotation)
-
-        # ── Custom ratio spinboxes (shown as popup via _show_ratio_menu) ─
+        # --- Custom Ratio ---
+        sbl.addWidget(sep_widget())
         self.custom_ratio_frame = QFrame()
         self.custom_ratio_frame.setStyleSheet("background:transparent; border:none;")
         cfl = QHBoxLayout(self.custom_ratio_frame)
@@ -1151,16 +961,14 @@ class ImageCompressor(QWidget):
         self.ratio_w.valueChanged.connect(self._apply_custom_ratio)
         self.ratio_h.valueChanged.connect(self._apply_custom_ratio)
         self.custom_ratio_frame.hide()
-
-        # Auto-crop button is now visible in btn_row beside _ratio_btn
-
-        crop_row = QHBoxLayout()
-        crop_row.setContentsMargins(0, 0, 0, 0)
-        crop_row.setSpacing(0)
-        crop_row.addStretch(1)
-        crop_row.addWidget(self.crop_panel)
-        crop_row.addStretch(1)
-        self._outer.addLayout(crop_row)
+        sbl.addWidget(section_label("Custom Ratio"))
+        sbl.addWidget(self.custom_ratio_frame)
+        hint = QLabel("Scroll to zoom\nDouble-click to reset view")
+        hint.setStyleSheet("color:rgba(255,255,255,0.18); font-size:10px; border:none;")
+        sbl.addWidget(hint)
+        sbl.addStretch()
+        layout.addWidget(sb)
+        self._outer.addWidget(self.crop_panel)
 
 
         self.bgremove_panel = QFrame()
@@ -1725,6 +1533,8 @@ class ImageCompressor(QWidget):
         self.mode = mode
         self.files = []
         self.list_frame.hide()
+        self.compress_canvas.hide()
+        self.compress_canvas.clear()
         self.crop_panel.hide()
         self.bgremove_panel.hide()
         self._bg_sidebar.hide()
@@ -1736,6 +1546,7 @@ class ImageCompressor(QWidget):
         self.crop_bar_controls.hide()
         self.bgremove_bar_controls.hide()
         self.pdf_bar_controls.hide()
+        self.crop_dim_lbl.hide()
         self.hint.show()
         self._animate_size(self.bar.height() or 80)
 
@@ -1744,23 +1555,29 @@ class ImageCompressor(QWidget):
 
         if mode == self.MODE_COMPRESS:
             self.compress_controls.show()
-            self.update_hint()
-            # re-populate compress list from tray
+            # re-populate compress list from tray (images + pdfs)
+            tray_paths = []
             for entry in self._tray:
-                if entry["type"] == "image":
+                if entry["type"] in ("image", "pdf"):
                     p = entry["path"]
                     self.files.append(p)
-                    kb = os.path.getsize(p) / 1024
-                    self.file_list.addItem(f"○  {os.path.basename(p)}   ·   {kb:.0f} KB")
-            if self.files:
+                    tray_paths.append(p)
+            if tray_paths:
+                self.compress_canvas.add_files(tray_paths)
+                self.hint.hide()
+                self.compress_canvas.show()
+                self._animate_size((self.bar.height() or 80) + 10 + self.compress_canvas.preferred_height())
+            else:
+                self.hint.show()
                 self.update_hint()
-                self._show_compress_list()
+                self._animate_size(self.bar.height() or 80)
         elif mode == self.MODE_CROP:
             self.crop_bar_controls.show()
             imgs = [e["path"] for e in self._tray if e["type"] == "image"]
             if self.crop_path is not None and self.crop_canvas._pil is not None:
                 # Revisit — canvas already loaded, just restore the panel instantly
                 self.hint.hide()
+                self.crop_dim_lbl.show()
                 self.crop_panel.show()
                 self._animate_size(self.bar.height() or 80 + 10 + PANEL_H)
             elif imgs:
@@ -1862,15 +1679,15 @@ class ImageCompressor(QWidget):
             self.bar_ratio_combo.blockSignals(True)
             self.bar_ratio_combo.setCurrentIndex(0)
             self.bar_ratio_combo.blockSignals(False)
-            self._ratio_btn.setText("  Free")
-            # Reset rotation ruler without triggering the handler
+            # Reset rotation slider without triggering the handler
             self.rotate_slider.blockSignals(True)
             self.rotate_slider.setValue(0)
-            self.rotate_angle_lbl.setText("0 °")
+            self.rotate_angle_lbl.setText("0°")
             self.rotate_slider.blockSignals(False)
             self.custom_ratio_frame.hide()
             self._clear_preset()
             self.hint.hide()
+            self.crop_dim_lbl.show()
             self.bgremove_panel.hide()
             self.list_frame.hide()
             for p in self._pdf_panels.values():
@@ -1881,7 +1698,7 @@ class ImageCompressor(QWidget):
             QMessageBox.critical(self, "Load error", str(ex))
 
     def _on_crop_changed(self, x, y, w, h):
-        pass  # resolution display removed
+        self.crop_dim_lbl.setText(f"{max(1, w)} × {max(1, h)} px")
 
     def _on_bar_ratio(self, idx):
         data = self.bar_ratio_combo.itemData(idx)
@@ -1889,10 +1706,6 @@ class ImageCompressor(QWidget):
             return  # separator row
         ratio, preset_info = data
         self.custom_ratio_frame.hide()
-
-        # Sync ratio button label
-        label_text = self.bar_ratio_combo.currentText()
-        self._ratio_btn.setText(f"  {label_text}" if label_text else "  Free")
 
         if ratio == "custom":
             self.custom_ratio_frame.show()
@@ -1919,33 +1732,6 @@ class ImageCompressor(QWidget):
             else:
                 self._active_preset = None
 
-    def _show_ratio_menu(self):
-        """Pop up a preset ratio menu anchored below the ratio button."""
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLE)
-
-        for label, ratio, preset in CROP_PRESETS:
-            if ratio == "sep":
-                menu.addSeparator()
-                continue
-            action = QAction(label, self)
-            action.setData((label, ratio, preset))
-            menu.addAction(action)
-
-        chosen = menu.exec_(
-            self._ratio_btn.mapToGlobal(self._ratio_btn.rect().bottomLeft())
-        )
-        if chosen is None:
-            return
-
-        label, ratio, preset_info = chosen.data()
-
-        # Sync the bar combo so all downstream logic (_on_bar_ratio) fires
-        for i in range(self.bar_ratio_combo.count()):
-            if self.bar_ratio_combo.itemText(i) == label:
-                self.bar_ratio_combo.setCurrentIndex(i)
-                break
-
     def _apply_custom_ratio(self):
         self.crop_canvas.set_aspect((self.ratio_w.value(), self.ratio_h.value()))
 
@@ -1953,18 +1739,22 @@ class ImageCompressor(QWidget):
         self.bar_ratio_combo.blockSignals(True)
         self.bar_ratio_combo.setCurrentIndex(0)
         self.bar_ratio_combo.blockSignals(False)
-        self._ratio_btn.setText("  Free")
         self.crop_canvas.set_aspect(None)
         self.crop_canvas.reset_zoom()
         self.custom_ratio_frame.hide()
         self._clear_preset()
 
     def _on_rotate_slider(self, value):
-        """Called whenever the rotation ruler moves."""
+        """Called whenever the rotation slider moves."""
         if not self.crop_path:
             return
-        self.rotate_angle_lbl.setText(f"{value} °")
+        self.rotate_angle_lbl.setText(f"{value}°")
         self.crop_canvas.rotate_image(value)
+        pil = self.crop_canvas._pil
+        if pil:
+            self.crop_img_info.setText(
+                f"{pil.width} \u00d7 {pil.height} px\n{os.path.basename(self.crop_path)}"
+            )
 
     def _reset_rotation(self):
         """Snap the rotation slider back to 0 and restore the unrotated image."""
@@ -1981,7 +1771,7 @@ class ImageCompressor(QWidget):
         self.crop_canvas.flip_image('horizontal')
         self.rotate_slider.blockSignals(True)
         self.rotate_slider.setValue(0)
-        self.rotate_angle_lbl.setText("0 °")
+        self.rotate_angle_lbl.setText("0°")
         self.rotate_slider.blockSignals(False)
         pil = self.crop_canvas._pil
         if pil:
@@ -2000,7 +1790,7 @@ class ImageCompressor(QWidget):
         self.crop_canvas.flip_image('vertical')
         self.rotate_slider.blockSignals(True)
         self.rotate_slider.setValue(0)
-        self.rotate_angle_lbl.setText("0 °")
+        self.rotate_angle_lbl.setText("0°")
         self.rotate_slider.blockSignals(False)
         pil = self.crop_canvas._pil
         if pil:
@@ -2025,186 +1815,191 @@ class ImageCompressor(QWidget):
         self.rotate_slider.setValue(new_angle)
 
     # ── Auto Crop ────────────────────────────────────────────────────────
+    def _auto_crop(self):
+        """AI-powered auto crop: detect faces/subjects/saliency and position the crop box."""
+        if not self.crop_path:
+            return
+        if not HAS_CV2:
+            QMessageBox.warning(self, "Auto Crop",
+                                "OpenCV is not installed.\nRun: pip install opencv-python-headless")
+            return
 
-    @staticmethod
-    def _prepare_gray(pil, max_dim=900):
-        """Return (gray_small, scale_factor, gray_full) for detection."""
-        import numpy as np
+        pil = self.crop_canvas.get_pil_image()
+        if pil is None:
+            return
+
         iw, ih = pil.width, pil.height
         img_rgb = np.array(pil.convert("RGB"))
         img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        scale = 1.0
-        if max(iw, ih) > max_dim:
-            scale = max_dim / max(iw, ih)
-            small = cv2.resize(gray, None, fx=scale, fy=scale,
-                               interpolation=cv2.INTER_AREA)
-        else:
-            small = gray
-        return small, scale, gray
 
-    @staticmethod
-    def _detect_faces(small_gray, scale, iw, ih):
-        """
-        Run frontal + profile cascades over multiple scaleFactor passes.
-        Returns a list of (x, y, w, h) in full-image coordinates, or [].
-        """
-        cascades = [
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
-            cv2.data.haarcascades + "haarcascade_profileface.xml",
-        ]
-        scale_factors = [1.05, 1.1, 1.15]
-        all_faces = []
-        for cascade_path in cascades:
+        MAX_DIM = 800
+        scale_factor = 1.0
+        if max(iw, ih) > MAX_DIM:
+            scale_factor = MAX_DIM / max(iw, ih)
+            small_gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor,
+                                    interpolation=cv2.INTER_AREA)
+        else:
+            small_gray = gray
+
+        roi = None
+
+        # Strategy 1: Face detection
+        try:
+            face_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            faces = face_cascade.detectMultiScale(
+                small_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+            )
+            if len(faces) > 0:
+                fx1 = min(f[0] for f in faces)
+                fy1 = min(f[1] for f in faces)
+                fx2 = max(f[0] + f[2] for f in faces)
+                fy2 = max(f[1] + f[3] for f in faces)
+                fx1 = int(fx1 / scale_factor)
+                fy1 = int(fy1 / scale_factor)
+                fx2 = int(fx2 / scale_factor)
+                fy2 = int(fy2 / scale_factor)
+                fw = fx2 - fx1
+                fh = fy2 - fy1
+                pad_x = int(fw * 0.6)
+                pad_y_top = int(fh * 0.5)
+                pad_y_bot = int(fh * 1.2)
+                roi = (
+                    max(0, fx1 - pad_x),
+                    max(0, fy1 - pad_y_top),
+                    min(iw, fx2 + pad_x) - max(0, fx1 - pad_x),
+                    min(ih, fy2 + pad_y_bot) - max(0, fy1 - pad_y_top),
+                )
+        except Exception:
+            pass
+
+        # Strategy 2: Upper-body / profile face
+        if roi is None:
             try:
-                det = cv2.CascadeClassifier(cascade_path)
-                if det.empty():
-                    continue
-                for sf in scale_factors:
-                    hits = det.detectMultiScale(
-                        small_gray, scaleFactor=sf,
-                        minNeighbors=4, minSize=(24, 24)
+                upper_cascade = cv2.CascadeClassifier(
+                    cv2.data.haarcascades + "haarcascade_upperbody.xml"
+                )
+                bodies = upper_cascade.detectMultiScale(
+                    small_gray, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50)
+                )
+                if len(bodies) > 0:
+                    bx1 = min(b[0] for b in bodies)
+                    by1 = min(b[1] for b in bodies)
+                    bx2 = max(b[0] + b[2] for b in bodies)
+                    by2 = max(b[1] + b[3] for b in bodies)
+                    bx1 = int(bx1 / scale_factor)
+                    by1 = int(by1 / scale_factor)
+                    bx2 = int(bx2 / scale_factor)
+                    by2 = int(by2 / scale_factor)
+                    pad = int((bx2 - bx1) * 0.3)
+                    roi = (
+                        max(0, bx1 - pad),
+                        max(0, by1 - pad),
+                        min(iw, bx2 + pad) - max(0, bx1 - pad),
+                        min(ih, by2 + pad) - max(0, by1 - pad),
                     )
-                    if len(hits) > 0:
-                        for (fx, fy, fw, fh) in hits:
-                            all_faces.append((
-                                int(fx / scale), int(fy / scale),
-                                int(fw / scale), int(fh / scale),
-                            ))
-                        break   # found at this cascade — no need for coarser SF
             except Exception:
                 pass
 
-        if not all_faces:
-            return []
+        # Strategy 3: Saliency / edge-energy map
+        if roi is None:
+            try:
+                roi = self._saliency_roi(gray, iw, ih)
+            except Exception:
+                pass
 
-        # Merge overlapping detections with a simple union-of-bbox approach
-        # Sort by area descending, keep only those that don't overlap too much
-        all_faces.sort(key=lambda f: f[2] * f[3], reverse=True)
-        merged = []
-        for face in all_faces:
-            fx, fy, fw, fh = face
-            duplicate = False
-            for mx, my, mw, mh in merged:
-                # Intersection-over-min-area overlap check
-                ix = max(0, min(fx + fw, mx + mw) - max(fx, mx))
-                iy = max(0, min(fy + fh, my + mh) - max(fy, my))
-                inter = ix * iy
-                min_area = min(fw * fh, mw * mh)
-                if min_area > 0 and inter / min_area > 0.4:
-                    duplicate = True
-                    break
-            if not duplicate:
-                merged.append(face)
-        return merged
+        # Strategy 4: Center crop fallback
+        if roi is None:
+            roi = (0, 0, iw, ih)
 
-    @staticmethod
-    def _fit_roi_to_aspect(rx, ry, rw, rh, iw, ih, aspect):
-        """
-        Expand/shrink the roi box so it matches the target aspect ratio (w, h tuple),
-        keeping the subject centred.  Returns (rx, ry, rw, rh) as floats.
-        """
-        if aspect is None:
-            return float(rx), float(ry), float(rw), float(rh)
-        aw, ah = float(aspect[0]), float(aspect[1])
-        target = aw / ah
-        cx = rx + rw / 2.0
-        cy = ry + rh / 2.0
-        cur = rw / max(1.0, rh)
-        if cur > target:
-            # ROI is wider than target → expand height
-            new_h = rw / target
-            new_w = float(rw)
+        aspect = self.crop_canvas._aspect
+        rx, ry, rw, rh = roi
+        if aspect:
+            aw, ah = float(aspect[0]), float(aspect[1])
+            target_ratio = aw / ah
+            roi_ratio = rw / max(1, rh)
+            if roi_ratio > target_ratio:
+                new_h = rw / target_ratio
+                if new_h <= ih:
+                    center_y = ry + rh / 2
+                    ry = max(0, center_y - new_h / 2)
+                    rh = new_h
+                    if ry + rh > ih:
+                        ry = ih - rh
+                else:
+                    rh = float(ih)
+                    rw = rh * target_ratio
+                    center_x = rx + roi[2] / 2
+                    rx = max(0, center_x - rw / 2)
+                    if rx + rw > iw:
+                        rx = iw - rw
+                    ry = 0
+            else:
+                new_w = rh * target_ratio
+                if new_w <= iw:
+                    center_x = rx + rw / 2
+                    rx = max(0, center_x - new_w / 2)
+                    rw = new_w
+                    if rx + rw > iw:
+                        rx = iw - rw
+                else:
+                    rw = float(iw)
+                    rh = rw / target_ratio
+                    center_y = ry + roi[3] / 2
+                    ry = max(0, center_y - rh / 2)
+                    if ry + rh > ih:
+                        ry = ih - rh
+                    rx = 0
         else:
-            # ROI is taller than target → expand width
-            new_w = rh * target
-            new_h = float(rh)
-        # Clamp to image bounds while keeping the ratio
-        if new_w > iw:
-            new_w = float(iw)
-            new_h = new_w / target
-        if new_h > ih:
-            new_h = float(ih)
-            new_w = new_h * target
-        rx = max(0.0, min(cx - new_w / 2, iw - new_w))
-        ry = max(0.0, min(cy - new_h / 2, ih - new_h))
-        return rx, ry, new_w, new_h
+            pad = int(min(rw, rh) * 0.08)
+            rx = max(0, rx - pad)
+            ry = max(0, ry - pad)
+            rw = min(iw - rx, rw + 2 * pad)
+            rh = min(ih - ry, rh + 2 * pad)
 
-    @staticmethod
-    def _rule_of_thirds_nudge(rx, ry, rw, rh, iw, ih):
-        """
-        Nudge the crop box toward the nearest rule-of-thirds intersection.
-        Only applied when the crop is meaningfully smaller than the image.
-        """
-        if rw >= iw * 0.75 or rh >= ih * 0.75:
-            return rx, ry, rw, rh
-        cx = rx + rw / 2.0
-        cy = ry + rh / 2.0
-        # Nearest third on each axis
-        tx = min([iw / 3.0, 2 * iw / 3.0], key=lambda t: abs(t - cx))
-        ty = min([ih / 3.0, 2 * ih / 3.0], key=lambda t: abs(t - cy))
-        max_shift = min(iw, ih) * 0.12   # cap the nudge at 12% of the shorter side
-        dx = max(-max_shift, min(max_shift, tx - cx))
-        dy = max(-max_shift, min(max_shift, ty - cy))
-        new_rx = rx + dx
-        new_ry = ry + dy
-        # Keep within image
-        if new_rx >= 0 and new_rx + rw <= iw:
-            rx = new_rx
-        if new_ry >= 0 and new_ry + rh <= ih:
-            ry = new_ry
-        return rx, ry, rw, rh
+        # Rule-of-thirds nudge for small crops
+        if rw < iw * 0.7 and rh < ih * 0.7:
+            thirds_x = iw / 3.0
+            roi_cx = rx + rw / 2.0
+            if roi_cx < iw / 2:
+                target_cx = thirds_x
+            else:
+                target_cx = 2 * thirds_x
+            shift_x = target_cx - (rx + rw / 2.0)
+            shift_x = max(-iw * 0.1, min(iw * 0.1, shift_x))
+            new_rx = rx + shift_x
+            if new_rx >= 0 and new_rx + rw <= iw:
+                rx = new_rx
+
+        rx = max(0, int(rx))
+        ry = max(0, int(ry))
+        rw = max(1, min(int(rw), iw - rx))
+        rh = max(1, min(int(rh), ih - ry))
+
+        self.crop_canvas.set_crop_coords(rx, ry, rw, rh)
+        self.crop_canvas._emit()
 
     @staticmethod
     def _saliency_roi(gray, iw, ih):
-        """
-        Centre-weighted saliency map combining edge energy and a Gaussian
-        centre-bias, so subjects near the middle of busy images win.
-        """
-        # Edge energy
+        """Compute a saliency-based region of interest using edge energy."""
         gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        energy = np.sqrt(gx ** 2 + gy ** 2)
-        energy = energy / (energy.max() + 1e-8)
-
-        # Centre-bias Gaussian (sigma = 40% of image size)
-        h, w = gray.shape
-        Y, X = np.mgrid[0:h, 0:w]
-        sigma_x = w * 0.40
-        sigma_y = h * 0.40
-        gauss = np.exp(
-            -((X - w / 2) ** 2) / (2 * sigma_x ** 2)
-            - ((Y - h / 2) ** 2) / (2 * sigma_y ** 2)
-        )
-
-        saliency = (energy * 0.6 + gauss * 0.4)
-        saliency = (saliency / (saliency.max() + 1e-8) * 255).astype(np.uint8)
-
-        blur_size = max(3, min(iw, ih) // 6) | 1
-        blurred = cv2.GaussianBlur(saliency, (blur_size, blur_size), 0)
-
-        thresh_val = np.percentile(blurred, 72)
+        mag = np.sqrt(gx ** 2 + gy ** 2)
+        mag = (mag / (mag.max() + 1e-8) * 255).astype(np.uint8)
+        blur_size = max(3, min(iw, ih) // 8) | 1
+        blurred = cv2.GaussianBlur(mag, (blur_size, blur_size), 0)
+        thresh_val = np.percentile(blurred, 70)
         _, mask = cv2.threshold(blurred, int(thresh_val), 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
-        # Weight contours by area × distance-from-centre score
-        cx_img, cy_img = w / 2.0, h / 2.0
-        def _score(c):
-            area = cv2.contourArea(c)
-            m = cv2.moments(c)
-            if m["m00"] == 0:
-                return area
-            ccx = m["m10"] / m["m00"]
-            ccy = m["m01"] / m["m00"]
-            dist = ((ccx - cx_img) ** 2 + (ccy - cy_img) ** 2) ** 0.5
-            max_dist = (cx_img ** 2 + cy_img ** 2) ** 0.5 + 1
-            centre_w = 1.0 - 0.5 * dist / max_dist
-            return area * centre_w
-        top = sorted(contours, key=_score, reverse=True)[:6]
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        top = contours[:min(5, len(contours))]
         all_pts = np.vstack(top)
         bx, by, bw, bh = cv2.boundingRect(all_pts)
-        pad = int(min(bw, bh) * 0.12)
+        pad = int(min(bw, bh) * 0.15)
         return (
             max(0, bx - pad),
             max(0, by - pad),
@@ -2212,170 +2007,111 @@ class ImageCompressor(QWidget):
             min(ih, by + bh + pad) - max(0, by - pad),
         )
 
-    def _auto_crop(self):
-        """
-        Smart auto-crop: tries face detection → upper-body → centre-weighted
-        saliency → whole-image fallback, then fits to the active aspect ratio
-        and nudges toward a rule-of-thirds intersection.
-        """
-        if not self.crop_path:
-            return
-        if not HAS_CV2:
-            QMessageBox.warning(self, "Auto Crop",
-                                "OpenCV is not installed.\n"
-                                "Run:  pip install opencv-python-headless")
-            return
-
-        # Use _pil — the same image whose pixel coords set_crop_coords operates on.
-        # get_pil_image() returns the full-res original which can be much larger,
-        # causing every computed ROI to be clamped away as out-of-bounds.
-        pil = self.crop_canvas._pil
-        if pil is None:
-            return
-
-        iw, ih = pil.width, pil.height
-        small_gray, scale, gray = self._prepare_gray(pil)
-        roi = None
-
-        # ── Strategy 1: Face detection (frontal + profile, multi-pass) ──
-        faces = self._detect_faces(small_gray, scale, iw, ih)
-        if faces:
-            # Union bounding box of all detected faces
-            fx1 = min(f[0] for f in faces)
-            fy1 = min(f[1] for f in faces)
-            fx2 = max(f[0] + f[2] for f in faces)
-            fy2 = max(f[1] + f[3] for f in faces)
-            fw, fh = fx2 - fx1, fy2 - fy1
-            # Generous padding: more headroom above, body space below
-            pad_x     = int(fw * 0.65)
-            pad_top   = int(fh * 0.60)
-            pad_bot   = int(fh * 1.30)
-            x1 = max(0, fx1 - pad_x)
-            y1 = max(0, fy1 - pad_top)
-            x2 = min(iw, fx2 + pad_x)
-            y2 = min(ih, fy2 + pad_bot)
-            roi = (x1, y1, x2 - x1, y2 - y1)
-
-        # ── Strategy 2: Upper-body detector ─────────────────────────────
-        if roi is None:
-            try:
-                det = cv2.CascadeClassifier(
-                    cv2.data.haarcascades + "haarcascade_upperbody.xml"
-                )
-                if not det.empty():
-                    for sf in [1.05, 1.1, 1.15]:
-                        bodies = det.detectMultiScale(
-                            small_gray, scaleFactor=sf,
-                            minNeighbors=3, minSize=(40, 40)
-                        )
-                        if len(bodies) > 0:
-                            bx1 = int(min(b[0] for b in bodies) / scale)
-                            by1 = int(min(b[1] for b in bodies) / scale)
-                            bx2 = int(max(b[0] + b[2] for b in bodies) / scale)
-                            by2 = int(max(b[1] + b[3] for b in bodies) / scale)
-                            pad = int((bx2 - bx1) * 0.25)
-                            roi = (
-                                max(0, bx1 - pad), max(0, by1 - pad),
-                                min(iw, bx2 + pad) - max(0, bx1 - pad),
-                                min(ih, by2 + pad) - max(0, by1 - pad),
-                            )
-                            break
-            except Exception:
-                pass
-
-        # ── Strategy 3: Centre-weighted saliency map ─────────────────────
-        if roi is None:
-            try:
-                roi = self._saliency_roi(gray, iw, ih)
-            except Exception:
-                pass
-
-        # ── Strategy 4: Full-image fallback ──────────────────────────────
-        if roi is None:
-            roi = (0, 0, iw, ih)
-
-        rx, ry, rw, rh = roi
-
-        # Fit to active aspect ratio (keeps subject centred)
-        aspect = self.crop_canvas._aspect
-        if aspect:
-            rx, ry, rw, rh = self._fit_roi_to_aspect(rx, ry, rw, rh, iw, ih, aspect)
-        else:
-            # Add a small breathing margin when no ratio is locked
-            margin = int(min(rw, rh) * 0.06)
-            rx = max(0, rx - margin)
-            ry = max(0, ry - margin)
-            rw = min(iw - rx, rw + 2 * margin)
-            rh = min(ih - ry, rh + 2 * margin)
-
-        # Rule-of-thirds nudge
-        rx, ry, rw, rh = self._rule_of_thirds_nudge(rx, ry, rw, rh, iw, ih)
-
-        self.crop_canvas.set_crop_coords(
-            max(0, int(rx)), max(0, int(ry)),
-            max(1, min(int(rw), iw - max(0, int(rx)))),
-            max(1, min(int(rh), ih - max(0, int(ry)))),
-        )
-        self.crop_canvas._emit()
-
     # ── Preset helpers ───────────────────────────────────────────────────
     def _clear_preset(self):
         """Clear active preset tracking."""
         self._active_preset = None
 
     def _auto_crop_for_official(self):
-        """
-        Face-centred auto-crop for passport / visa / ID photos.
-        Targets ICAO guidelines: face occupies ~70-80% of frame height,
-        eyes positioned in the upper-centre third of the frame.
-        Falls back to general _auto_crop if no face is found.
-        """
+        """Face-centered auto-crop optimised for passport/visa/ID photos."""
         if not self.crop_path or not HAS_CV2:
             self._auto_crop()
             return
 
-        pil = self.crop_canvas._pil
+        pil = self.crop_canvas.get_pil_image()
         if pil is None:
             return
 
         iw, ih = pil.width, pil.height
-        small_gray, scale, _ = self._prepare_gray(pil)
+        img_rgb = np.array(pil.convert("RGB"))
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-        faces = self._detect_faces(small_gray, scale, iw, ih)
-        if not faces:
+        MAX_DIM = 800
+        scale_factor = 1.0
+        if max(iw, ih) > MAX_DIM:
+            scale_factor = MAX_DIM / max(iw, ih)
+            small_gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor,
+                                    interpolation=cv2.INTER_AREA)
+        else:
+            small_gray = gray
+
+        roi = None
+        try:
+            face_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            faces = face_cascade.detectMultiScale(
+                small_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+            )
+            if len(faces) > 0:
+                faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+                fx, fy, fw, fh = faces[0]
+                fx = int(fx / scale_factor)
+                fy = int(fy / scale_factor)
+                fw = int(fw / scale_factor)
+                fh = int(fh / scale_factor)
+                head_pad_top = int(fh * 0.70)
+                head_pad_bot = int(fh * 0.50)
+                head_pad_x = int(fw * 0.40)
+                roi = (
+                    max(0, fx - head_pad_x),
+                    max(0, fy - head_pad_top),
+                    min(iw, fx + fw + head_pad_x) - max(0, fx - head_pad_x),
+                    min(ih, fy + fh + head_pad_bot) - max(0, fy - head_pad_top),
+                )
+        except Exception:
+            pass
+
+        if roi is None:
             self._auto_crop()
             return
 
-        # Use the largest detected face
-        faces.sort(key=lambda f: f[2] * f[3], reverse=True)
-        fx, fy, fw, fh = faces[0]
-
-        # ICAO: face height ~70% of frame → frame height = fh / 0.70
-        # Eyes are roughly at fy + 0.35*fh; position them at ~40% from top of frame
-        frame_h = fh / 0.70
-        frame_w = frame_h  # will be adjusted to aspect ratio below
-        eye_y   = fy + fh * 0.35          # estimated eye line in image coords
-        top     = eye_y - frame_h * 0.40   # frame top so eyes sit at 40% height
-
-        cx = fx + fw / 2.0
-        rx = cx - frame_w / 2.0
-        ry = top
-
-        # Clamp within image
-        rx = max(0.0, min(rx, iw - frame_w))
-        ry = max(0.0, min(ry, ih - frame_h))
-        rw, rh = frame_w, frame_h
-
-        # Fit to active aspect ratio
         aspect = self.crop_canvas._aspect
+        rx, ry, rw, rh = roi
         if aspect:
-            rx, ry, rw, rh = self._fit_roi_to_aspect(rx, ry, rw, rh, iw, ih, aspect)
+            aw, ah = float(aspect[0]), float(aspect[1])
+            target_ratio = aw / ah
+            roi_ratio = rw / max(1, rh)
+            if roi_ratio > target_ratio:
+                new_h = rw / target_ratio
+                if new_h <= ih:
+                    center_y = ry + rh / 2
+                    ry = max(0, center_y - new_h / 2)
+                    rh = new_h
+                    if ry + rh > ih:
+                        ry = ih - rh
+                else:
+                    rh = float(ih)
+                    rw = rh * target_ratio
+                    center_x = rx + roi[2] / 2
+                    rx = max(0, center_x - rw / 2)
+                    if rx + rw > iw:
+                        rx = iw - rw
+                    ry = 0
+            else:
+                new_w = rh * target_ratio
+                if new_w <= iw:
+                    center_x = rx + rw / 2
+                    rx = max(0, center_x - new_w / 2)
+                    rw = new_w
+                    if rx + rw > iw:
+                        rx = iw - rw
+                else:
+                    rw = float(iw)
+                    rh = rw / target_ratio
+                    center_y = ry + roi[3] / 2
+                    ry = max(0, center_y - rh / 2)
+                    if ry + rh > ih:
+                        ry = ih - rh
+                    rx = 0
 
-        self.crop_canvas.set_crop_coords(
-            max(0, int(rx)), max(0, int(ry)),
-            max(1, min(int(rw), iw - max(0, int(rx)))),
-            max(1, min(int(rh), ih - max(0, int(ry)))),
-        )
+        rx = max(0, int(rx))
+        ry = max(0, int(ry))
+        rw = max(1, min(int(rw), iw - rx))
+        rh = max(1, min(int(rh), ih - ry))
+
+        self.crop_canvas.set_crop_coords(rx, ry, rw, rh)
         self.crop_canvas._emit()
 
     def _do_crop_save(self):
@@ -2414,10 +2150,10 @@ class ImageCompressor(QWidget):
             if save_dpi:
                 save_kwargs["dpi"] = save_dpi
             cropped.save(out, **save_kwargs)
-            self.crop_save_btn.setText("Saved!")
+            self.crop_save_btn.setText("✓  Saved!")
             QApplication.processEvents()
             time.sleep(0.8)
-            self.crop_save_btn.setText("Crop")
+            self.crop_save_btn.setText("✂  Crop & Save")
         except Exception as ex:
             QMessageBox.critical(self, "Save failed", str(ex))
 
@@ -2438,7 +2174,7 @@ class ImageCompressor(QWidget):
             p.hide()
         self._animate_size(self.bar.height() or 80)
 
-        self._bg_thread = QThread()
+        self._bg_thread = QThread(self)
         self._bg_worker = BgRemoveWorker(
             path,
             remover=self.bg_remover
@@ -2448,14 +2184,12 @@ class ImageCompressor(QWidget):
         self._bg_worker.finished.connect(self._on_bgremove_done)
         self._bg_worker.error.connect(self._on_bgremove_error)
         self._bg_worker.finished.connect(self._bg_thread.quit)
+        self._bg_thread.finished.connect(self._bg_worker.deleteLater)
         self._bg_thread.finished.connect(self._bg_thread.deleteLater)
-        self._bg_thread.finished.connect(self._on_bg_thread_done)
         self._bg_thread.start()
 
     def _on_bg_thread_done(self):
-        """Null out the thread ref after Qt deletes the C++ object."""
-        self._bg_thread = None
-        self._bg_worker = None
+        pass
 
     def _bg_thread_is_running(self):
         """Safe isRunning() — returns False if the C++ object has been deleted."""
@@ -2464,6 +2198,15 @@ class ImageCompressor(QWidget):
         except RuntimeError:
             self._bg_thread = None
             self._bg_worker = None
+            return False
+
+    def _compress_thread_is_running(self):
+        """Safe isRunning() for self._thread — handles deleted C++ QThread."""
+        try:
+            return self._thread is not None and self._thread.isRunning()
+        except RuntimeError:
+            self._thread = None
+            self._worker = None
             return False
 
     def _on_bgremove_done(self, pil_rgba, remover):
@@ -2776,83 +2519,156 @@ class ImageCompressor(QWidget):
     # ------------------------------------------------------------------
     # COMPRESS
     # ------------------------------------------------------------------
-    def _show_compress_list(self):
-        self.list_frame.show()
-        rows = min(len(self.files), 6)
-        self._animate_size(self.bar.height() or 80 + 10 + 20 + 34 + rows * 44 + 20)
+    def _on_compress_canvas_remove(self, path):
+        """Handle a file removed from the compress drop zone."""
+        if path in self.files:
+            self.files.remove(path)
+        # Also remove from tray
+        self._tray = [e for e in self._tray if e["path"] != path]
+        self._refresh_tray()
+        self.update_hint()
+        if self.files:
+            self._animate_size((self.bar.height() or 80) + 10 + self.compress_canvas.preferred_height())
+        else:
+            # Last file removed — hide canvas, show hint like crop mode
+            self.compress_canvas.hide()
+            self.hint.show()
+            self._animate_size(self.bar.height() or 80)
 
-    def _compress_item_menu(self, pos):
-        item = self.file_list.itemAt(pos)
-        if not item:
-            return
-        row = self.file_list.row(item)
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLE)
-        rem = QAction("✕  Remove this file", self)
-        menu.addAction(rem)
-        chosen = menu.exec_(self.file_list.mapToGlobal(pos))
-        if chosen == rem:
-            self.files.pop(row)
-            self.file_list.takeItem(row)
-            self.update_hint()
-            if not self.files:
-                a = QPropertyAnimation(self, b"size")
-                a.setDuration(220)
-                a.setStartValue(self.size())
-                a.setEndValue(QSize(WIN_W, 80))
-                a.setEasingCurve(QEasingCurve.OutCubic)
-                a.finished.connect(self.list_frame.hide)
-                a.start()
-                self._anim = a
-
-    def compress_all(self):
+    def compress_all(self, force_compress=False):
         if not self.files:
-            QMessageBox.warning(self, "No images", "Add some images first.")
+            QMessageBox.warning(self, "No files", "Add some images or PDFs first.")
             return
+
         try:
-            target_kb = int(self.kb_input.text())
-            if target_kb <= 0:
-                raise ValueError
+            global_target = int(self.kb_input.text())
+            if global_target <= 0:
+                global_target = None
         except ValueError:
-            QMessageBox.warning(self, "Invalid size", "Enter a valid target KB value.")
+            global_target = None
+
+        # Collect per-file targets from cards
+        file_targets = self.compress_canvas.get_file_targets()
+
+        # Validate: every file must have a valid target
+        all_valid = True
+        files_with_targets = []
+        for path, target_kb in file_targets:
+            card = self.compress_canvas.get_card_by_path(path)
+            
+            final_target = target_kb if target_kb is not None else global_target
+
+            if final_target is None:
+                all_valid = False
+                if card:
+                    card.mark_invalid_target(True)
+            else:
+                if card:
+                    card.mark_invalid_target(False)
+                files_with_targets.append((path, final_target))
+
+        if not all_valid:
+            QMessageBox.warning(self, "Missing targets",
+                                "Please enter a target size in the main input box or for each file.")
             return
+
+        self._quality_limited_files = []   # track files that hit quality limits
+        self._compress_file_targets = files_with_targets  # keep reference
+
+        # Mark all cards as compressing
+        for path, _kb in files_with_targets:
+            card = self.compress_canvas.get_card_by_path(path)
+            if card:
+                card.set_compressing()
 
         self.compress_btn.setEnabled(False)
-        self.compress_btn.setText("⏳  Compressing…")
+        self.compress_btn.setText("\u23f3  Compressing\u2026")
         self.add_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
-        self.progress_bar.setMaximum(len(self.files))
+        self.progress_bar.setMaximum(len(files_with_targets))
         self.progress_bar.setValue(0)
         self.progress_bar.show()
-        self.file_list.clear()
-        for p in self.files:
-            kb = os.path.getsize(p) / 1024
-            self.file_list.addItem(f"○  {os.path.basename(p)}   ·   {kb:.0f} KB")
 
-        self._thread = QThread()
-        self._worker = CompressWorker(list(self.files), target_kb, "compressed_images")
+        self._thread = QThread(self)
+        self._worker = CompressWorker(files_with_targets, "compressed_images",
+                                      force_compress=force_compress)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_done)
         self._worker.error.connect(self._on_err)
+        self._worker.quality_limit.connect(self._on_quality_limit)
         self._worker.finished.connect(self._on_all_done)
         self._worker.finished.connect(self._thread.quit)
+        self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
+    def _on_quality_limit(self, i, filename, achieved_kb, target_kb, output_path):
+        """Handle a file that couldn't reach target size without quality loss.
+        Shows an inline warning inside the file card — no popup dialog."""
+        ext = os.path.splitext(filename)[1].lower()
+        file_type = "PDF" if ext == '.pdf' else "Image"
+        source_path = self._compress_file_targets[i][0] if hasattr(self, '_compress_file_targets') and i < len(self._compress_file_targets) else None
+
+        info = {
+            'index': i,
+            'filename': filename,
+            'achieved_kb': achieved_kb,
+            'target_kb': target_kb,
+            'output_path': output_path,
+            'source_path': source_path,
+            'type': file_type,
+        }
+        self._quality_limited_files.append(info)
+        self.progress_bar.setValue(i + 1)
+
+        if source_path:
+            card = self.compress_canvas.get_card_by_path(source_path)
+            if card:
+                # Show the inline warning with keep/force buttons
+                card.set_status("warning",
+                    f"Compressed to {achieved_kb:.0f} KB · quality limit reached")
+
+                def on_keep(_=False, info=info, card=card):
+                    def _do_keep():
+                        card.hide_quality_warning()
+                        card.set_status("warning",
+                            f"Kept at {info['achieved_kb']:.0f} KB (target: {info['target_kb']:.0f} KB)")
+                        if info in self._quality_limited_files:
+                            self._quality_limited_files.remove(info)
+                        self.compress_canvas._sync_state()
+                        self._animate_size((self.bar.height() or 80) + 10 + self.compress_canvas.preferred_height())
+                    QTimer.singleShot(0, _do_keep)
+
+                def on_force(_=False, info=info, card=card):
+                    def _do_force():
+                        card.hide_quality_warning()
+                        self.compress_canvas._sync_state()
+                        self._quality_limited_files = [info]
+                        self._force_recompress_files()
+                    QTimer.singleShot(0, _do_force)
+
+                card.show_quality_warning(achieved_kb, target_kb, on_keep, on_force)
+                # Re-size window to fit the expanded card
+                QTimer.singleShot(50, lambda: self._animate_size(
+                    (self.bar.height() or 80) + 10 + self.compress_canvas.preferred_height()))
+
     def _on_done(self, i, text):
-        item = self.file_list.item(i)
-        if item:
-            item.setText("●  " + text)
-            item.setForeground(QColor(74, 222, 128))
+        """Handle successful compression of a file — update its card."""
+        if hasattr(self, '_compress_file_targets') and i < len(self._compress_file_targets):
+            path = self._compress_file_targets[i][0]
+            card = self.compress_canvas.get_card_by_path(path)
+            if card:
+                card.set_status("success", text)
         self.progress_bar.setValue(i + 1)
 
     def _on_err(self, i, msg):
-        item = self.file_list.item(i)
-        fn = os.path.basename(self.files[i]) if i < len(self.files) else "?"
-        if item:
-            item.setText(f"●  {fn}  —  {msg}")
-            item.setForeground(QColor(248, 113, 113))
+        """Handle compression error — update the card."""
+        if hasattr(self, '_compress_file_targets') and i < len(self._compress_file_targets):
+            path = self._compress_file_targets[i][0]
+            card = self.compress_canvas.get_card_by_path(path)
+            if card:
+                card.set_status("error", f"Error: {msg}")
         self.progress_bar.setValue(self.progress_bar.value() + 1)
 
     def _on_all_done(self):
@@ -2860,18 +2676,306 @@ class ImageCompressor(QWidget):
         for p in list(self.files):
             self._scan_temps.discard(p)
         self.compress_btn.setEnabled(True)
-        self.compress_btn.setText("⚡  Compress")
+        self.compress_btn.setText("\u26a1  Compress")
         self.add_btn.setEnabled(True)
         self.clear_btn.setEnabled(True)
         self.progress_bar.hide()
-        rows = min(len(self.files), 6)
-        self._animate_size(self.bar.height() or 80 + 10 + 20 + 34 + rows * 44 + 20)
+        self.compress_canvas.set_all_enabled(True)
+        # Inline quality warnings are already shown per-card in _on_quality_limit.
+        # Re-enable the target inputs on non-limited cards.
+        if hasattr(self, '_compress_file_targets'):
+            limited_paths = {f['source_path'] for f in self._quality_limited_files}
+            for path, _kb in self._compress_file_targets:
+                if path not in limited_paths:
+                    card = self.compress_canvas.get_card_by_path(path)
+                    if card:
+                        card.target_input.setEnabled(True)
+
+    def _show_quality_limit_dialog(self):
+        """Show a styled per-file quality warning dialog matching the spec."""
+        limited = self._quality_limited_files
+        if not limited:
+            return
+
+        # We show one dialog per limited file so the user can decide for each
+        force_list = []
+        for f in limited:
+            do_force = self._show_single_quality_dialog(f)
+            if do_force:
+                force_list.append(f)
+
+        if force_list:
+            self._quality_limited_files = force_list
+            self._force_recompress_files()
+        else:
+            self._quality_limited_files = []
+
+    def _show_single_quality_dialog(self, f):
+        """Show quality warning for a single file. Returns True if user chose 'Compress Further'."""
+        filename = f['filename']
+        achieved_kb = f['achieved_kb']
+        target_kb = f['target_kb']
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Quality Warning")
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+        dlg.setFixedWidth(480)
+
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        frame = QFrame()
+        frame.setObjectName("qlDialog")
+        frame.setStyleSheet("""
+            QFrame#qlDialog {
+                background: #1a1a1f;
+                border-radius: 20px;
+                border: 1px solid rgba(255, 196, 0, 0.20);
+            }
+        """)
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(28, 26, 28, 26)
+        fl.setSpacing(14)
+
+        # ── Title row ──────────────────────────────────────────────────
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        warn_icon = QLabel("\u26a0\ufe0f")
+        warn_icon.setStyleSheet("font-size: 20px; border: none;")
+        title_row.addWidget(warn_icon)
+        title_lbl = QLabel("Quality Warning")
+        title_lbl.setStyleSheet("""
+            color: #ffc400;
+            font-size: 16px;
+            font-weight: 700;
+            border: none;
+        """)
+        title_row.addWidget(title_lbl)
+        title_row.addStretch()
+        fl.addLayout(title_row)
+
+        # ── Main description ───────────────────────────────────────────
+        desc_lbl = QLabel(
+            f"The requested target size for <b>{filename}</b> is too small and may cause "
+            f"noticeable quality loss, distortion, blurred text, pixelation, or reduced readability."
+        )
+        desc_lbl.setWordWrap(True)
+        desc_lbl.setStyleSheet("""
+            color: rgba(255,255,255,0.80);
+            font-size: 13px;
+            border: none;
+            line-height: 1.5;
+        """)
+        fl.addWidget(desc_lbl)
+
+        # ── Info box ──────────────────────────────────────────────────
+        info_frame = QFrame()
+        info_frame.setStyleSheet("""
+            QFrame {
+                background: rgba(255, 196, 0, 0.06);
+                border: 1px solid rgba(255, 196, 0, 0.15);
+                border-radius: 12px;
+            }
+        """)
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(16, 14, 16, 14)
+        info_layout.setSpacing(8)
+
+        achievable_row = QHBoxLayout()
+        achievable_lbl = QLabel("Current achievable size without significant quality loss:")
+        achievable_lbl.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; border: none;")
+        achievable_row.addWidget(achievable_lbl)
+        achievable_row.addStretch()
+        achievable_val = QLabel(f"<b>{achieved_kb:.0f} KB</b>")
+        achievable_val.setStyleSheet("color: rgba(74,222,128,0.90); font-size: 13px; font-weight: 700; border: none;")
+        achievable_row.addWidget(achievable_val)
+        info_layout.addLayout(achievable_row)
+
+        requested_row = QHBoxLayout()
+        requested_lbl = QLabel("Requested size:")
+        requested_lbl.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; border: none;")
+        requested_row.addWidget(requested_lbl)
+        requested_row.addStretch()
+        requested_val = QLabel(f"<b>{target_kb:.0f} KB</b>")
+        requested_val.setStyleSheet("color: rgba(248,113,113,0.90); font-size: 13px; font-weight: 700; border: none;")
+        requested_row.addWidget(requested_val)
+        info_layout.addLayout(requested_row)
+
+        fl.addWidget(info_frame)
+
+        # ── Question ──────────────────────────────────────────────────
+        q_lbl = QLabel("Do you want to continue compressing this file further?")
+        q_lbl.setWordWrap(True)
+        q_lbl.setStyleSheet("""
+            color: rgba(255,255,255,0.70);
+            font-size: 13px;
+            font-weight: 600;
+            border: none;
+        """)
+        fl.addWidget(q_lbl)
+
+        # ── Buttons ────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        keep_btn = QPushButton("Keep Best Quality")
+        keep_btn.setFixedHeight(44)
+        keep_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(74, 222, 128, 0.10);
+                border: 1px solid rgba(74, 222, 128, 0.25);
+                border-radius: 12px;
+                color: rgba(74, 222, 128, 0.90);
+                font-size: 13px;
+                font-weight: 600;
+                padding: 0px 18px;
+            }
+            QPushButton:hover {
+                background: rgba(74, 222, 128, 0.18);
+                border-color: rgba(74, 222, 128, 0.45);
+                color: rgb(74, 222, 128);
+            }
+            QPushButton:pressed { background: rgba(74, 222, 128, 0.25); }
+        """)
+        keep_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        keep_btn.clicked.connect(dlg.accept)  # accept = keep quality
+        btn_row.addWidget(keep_btn)
+
+        force_btn = QPushButton("Compress Further")
+        force_btn.setFixedHeight(44)
+        force_btn.setToolTip("The file may become distorted and some content quality may be permanently reduced.")
+        force_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(248, 113, 113, 0.12);
+                border: 1px solid rgba(248, 113, 113, 0.30);
+                border-radius: 12px;
+                color: rgba(248, 113, 113, 0.90);
+                font-size: 13px;
+                font-weight: 700;
+                padding: 0px 18px;
+            }
+            QPushButton:hover {
+                background: rgba(248, 113, 113, 0.22);
+                border-color: rgba(248, 113, 113, 0.55);
+                color: rgb(248, 113, 113);
+            }
+            QPushButton:pressed { background: rgba(248, 113, 113, 0.30); }
+        """)
+        force_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        force_btn.clicked.connect(dlg.reject)  # reject = force compress
+        btn_row.addWidget(force_btn)
+
+        fl.addLayout(btn_row)
+
+        # ── Footer warning ─────────────────────────────────────────────
+        footer_lbl = QLabel(
+            "If you choose Compress Further, the file may become distorted and "
+            "some content quality may be permanently reduced."
+        )
+        footer_lbl.setWordWrap(True)
+        footer_lbl.setStyleSheet("""
+            color: rgba(255,255,255,0.30);
+            font-size: 11px;
+            border: none;
+        """)
+        fl.addWidget(footer_lbl)
+
+        outer.addWidget(frame)
+
+        result = dlg.exec_()
+        return result == QDialog.Rejected  # True = user chose "Compress Further"
+
+    def _force_recompress_files(self):
+        """Re-run compression on quality-limited files with force=True."""
+        if not hasattr(self, '_quality_limited_files') or not self._quality_limited_files:
+            return
+        # Guard: don't start if a thread is already running
+        if self._compress_thread_is_running():
+            return
+
+        limited = self._quality_limited_files
+
+        # Always use the original requested target_kb for force compress
+        # (do NOT re-read the card input — use what the user originally asked for)
+        files_with_targets = [
+            (f['source_path'], int(f['target_kb']))
+            for f in limited
+            if f.get('source_path')
+        ]
+
+        if not files_with_targets:
+            return
+
+        # UI: mark buttons/progress
+        self.compress_btn.setEnabled(False)
+        self.compress_btn.setText("\u23f3  Force compressing\u2026")
+        self.add_btn.setEnabled(False)
+        self.clear_btn.setEnabled(False)
+        self.progress_bar.setMaximum(len(files_with_targets))
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+
+        # Mark the limited cards as in-progress
+        for info in limited:
+            card = self.compress_canvas.get_card_by_path(info.get('source_path', ''))
+            if card:
+                card.set_compressing()
+
+        self._force_limited_info = list(limited)   # copy, indexed by i
+        self._quality_limited_files = []           # reset
+
+        self._thread = QThread(self)
+        self._worker = CompressWorker(files_with_targets, "compressed_images",
+                                      force_compress=True)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_force_done)
+        self._worker.error.connect(self._on_force_err)
+        self._worker.finished.connect(self._on_force_all_done)
+        self._worker.finished.connect(self._thread.quit)
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.start()
+
+    def _on_force_done(self, i, text):
+        """Force compression succeeded for file i — update its card to amber success."""
+        if hasattr(self, '_force_limited_info') and i < len(self._force_limited_info):
+            path = self._force_limited_info[i].get('source_path', '')
+            card = self.compress_canvas.get_card_by_path(path)
+            if card:
+                # Show as warning-tinted success (force-compressed)
+                card.set_status("warning", text)
+        self.progress_bar.setValue(i + 1)
+
+    def _on_force_err(self, i, msg):
+        """Force compression error for file i — update its card."""
+        if hasattr(self, '_force_limited_info') and i < len(self._force_limited_info):
+            path = self._force_limited_info[i].get('source_path', '')
+            fn = self._force_limited_info[i]['filename']
+            card = self.compress_canvas.get_card_by_path(path)
+            if card:
+                card.set_status("error", f"{fn} \u2014 {msg}")
+        self.progress_bar.setValue(self.progress_bar.value() + 1)
+
+    def _on_force_all_done(self):
+        """All force compressions finished."""
+        self.compress_btn.setEnabled(True)
+        self.compress_btn.setText("\u26a1  Compress")
+        self.add_btn.setEnabled(True)
+        self.clear_btn.setEnabled(True)
+        self.progress_bar.hide()
+        # Re-enable all card inputs and remove buttons
+        self.compress_canvas.set_all_enabled(True)
+        # Resize window to fit any card height changes
+        QTimer.singleShot(50, lambda: self._animate_size(
+            (self.bar.height() or 80) + 10 + self.compress_canvas.preferred_height()))
 
     # ------------------------------------------------------------------
     # SHARED
     # ------------------------------------------------------------------
     def clear_files(self):
-        if self._thread and self._thread.isRunning():
+        if self._compress_thread_is_running():
             return
         self._tray.clear()
         self._refresh_tray()
@@ -2880,6 +2984,7 @@ class ImageCompressor(QWidget):
         self.bgremove_path = None
         self._bgremove_result = None
         self.file_list.clear()
+        self.compress_canvas.clear()
         self.crop_panel.hide()
         self.bgremove_panel.hide()
         self._bg_sidebar.hide()
@@ -2898,9 +3003,16 @@ class ImageCompressor(QWidget):
                 btn.setChecked(False)
             self.hint.show()
             self.hint.setText("Choose a PDF tool above  ·  then drop files below")
-        self.hint.show()
-        self.update_hint()
-        self._animate_size(self.bar.height() or 80)
+        self.crop_dim_lbl.hide()
+        if self.mode == self.MODE_COMPRESS:
+            self.compress_canvas.hide()
+            self.hint.show()
+            self.update_hint()
+            self._animate_size(self.bar.height() or 80)
+        else:
+            self.hint.show()
+            self.update_hint()
+            self._animate_size(self.bar.height() or 80)
 
     def open_output_folder(self):
         if self.mode == self.MODE_CROP:         folder = "cropped_images"
@@ -2915,11 +3027,13 @@ class ImageCompressor(QWidget):
 
     def update_hint(self):
         n = len(self.files)
-        if n == 0:    self.hint.setText("Drop images anywhere  ·  0 files loaded")
+        if n == 0:    self.hint.setText("Drop images or PDFs anywhere  ·  0 files loaded")
         elif n == 1:  self.hint.setText("1 file loaded  ·  ready to compress")
         else:         self.hint.setText(f"{n} files loaded  ·  ready to compress")
 
     def _animate_size(self, target_h):
+        if self.mode == self.MODE_COMPRESS and hasattr(self, 'compress_canvas'):
+            self.compress_canvas._sync_state()
         target = QSize(WIN_W, target_h)
         if self._anim and self._anim.state() == QPropertyAnimation.Running:
             self._anim.stop()
@@ -3049,7 +3163,7 @@ class ImageCompressor(QWidget):
         self._delete_scan_temps()
         if self._worker:
             self._worker.cancel()
-        if self._thread and self._thread.isRunning():
+        if self._compress_thread_is_running():
             self._thread.quit()
             self._thread.wait(2000)
         e.accept()
@@ -3085,9 +3199,9 @@ class QrFlyout(QDialog):
                 border: 1px solid rgba(255,255,255,0.10);
             }
         """)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(8)
+        cl = QHBoxLayout(card)
+        cl.setContentsMargins(14, 12, 14, 12)
+        cl.setSpacing(14)
 
         # QR image
         if server.qr_pil:
@@ -3098,7 +3212,7 @@ class QrFlyout(QDialog):
             qr_pix.loadFromData(buf.read())
             qr_lbl = QLabel()
             qr_lbl.setPixmap(
-                qr_pix.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                qr_pix.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             qr_lbl.setAlignment(Qt.AlignCenter)
             qr_lbl.setStyleSheet(
                 "border:none; background:white; border-radius:10px; padding:5px;")
@@ -3109,6 +3223,46 @@ class QrFlyout(QDialog):
                 "color:rgba(255,255,255,0.40); font-size:11px; border:none;")
             no_qr.setAlignment(Qt.AlignCenter)
             cl.addWidget(no_qr)
+
+        # Steps beside QR, same height
+        steps_col = QVBoxLayout()
+        steps_col.setSpacing(0)
+        steps_col.setContentsMargins(0, 0, 0, 0)
+        steps_col.addStretch()
+        for i, (icon, title, sub) in enumerate([
+            ("📶", "Same Wi-Fi", "Phone & PC on\nsame network"),
+            ("📷", "Scan QR",    "Point camera\nat the code"),
+            ("🖼", "Send Photo", "Pick photo —\narrives instantly"),
+        ]):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.setContentsMargins(0, 0, 0, 0)
+            icon_lbl = QLabel(icon)
+            icon_lbl.setFixedSize(28, 28)
+            icon_lbl.setAlignment(Qt.AlignCenter)
+            icon_lbl.setStyleSheet(
+                "background:rgba(88,101,242,0.18); border-radius:8px;"
+                "font-size:13px; border:none;")
+            row.addWidget(icon_lbl)
+            text_col = QVBoxLayout()
+            text_col.setSpacing(1)
+            text_col.setContentsMargins(0, 0, 0, 0)
+            t = QLabel(title)
+            t.setStyleSheet(
+                "color:rgba(255,255,255,0.88); font-size:11px;"
+                "font-weight:700; border:none;")
+            s = QLabel(sub)
+            s.setStyleSheet(
+                "color:rgba(255,255,255,0.38); font-size:10px; border:none;")
+            text_col.addWidget(t)
+            text_col.addWidget(s)
+            row.addLayout(text_col)
+            row.addStretch()
+            steps_col.addLayout(row)
+            if i < 2:
+                steps_col.addSpacing(10)
+        steps_col.addStretch()
+        cl.addLayout(steps_col)
 
         outer.addWidget(card)
 
@@ -3126,3 +3280,621 @@ class QrFlyout(QDialog):
         if not over_btn and not over_flyout:
             self._timer.stop()
             self.close()
+
+
+# =========================================
+# COMPRESS DROP ZONE (display-only, no own drops)
+# =========================================
+
+def _file_size_str(path):
+    kb = os.path.getsize(path) / 1024 if os.path.exists(path) else 0
+    return f"{kb:.1f} KB" if kb < 1024 else f"{kb / 1024:.1f} MB"
+
+
+# ── Individual file card ────────────────────────────────────────────
+
+class _CompressFileCard(QFrame):
+    """A single file card with thumbnail, info, target KB input, and inline quality warning."""
+    removed = pyqtSignal(str)   # emits path
+
+    CARD_STYLE = """
+    QFrame#fileCard {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 16px;
+    }
+    QFrame#fileCard[status="success"] {
+        border-color: rgba(74,222,128,0.35);
+        background: rgba(74,222,128,0.06);
+    }
+    QFrame#fileCard[status="warning"] {
+        border-color: rgba(255,196,0,0.35);
+        background: rgba(255,196,0,0.04);
+    }
+    QFrame#fileCard[status="error"] {
+        border-color: rgba(248,113,113,0.35);
+        background: rgba(248,113,113,0.06);
+    }
+    """
+
+    def __init__(self, path, preview_pixmap=None, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.setObjectName("fileCard")
+        self.setStyleSheet(self.CARD_STYLE)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        ext = os.path.splitext(path)[1].lower()
+        self._is_pdf = ext == '.pdf'
+        self._file_type = "PDF" if self._is_pdf else "Image"
+
+        # ── Outer: VBox so the warning section can grow below ──────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(0)
+
+        # ── Top row: thumb + info + target + remove ────────────────────
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(12)
+
+        # Thumbnail
+        self._thumb = QLabel()
+        self._thumb.setFixedSize(52, 60)
+        self._thumb.setAlignment(Qt.AlignCenter)
+        if preview_pixmap and not preview_pixmap.isNull():
+            scaled = preview_pixmap.scaled(
+                52, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._thumb.setPixmap(scaled)
+            self._thumb.setStyleSheet(
+                "background: #16161a; border-radius: 8px; border: none;")
+        else:
+            badge_text = ext.replace('.', '').upper()[:3] or 'FILE'
+            self._thumb.setText(badge_text)
+            self._thumb.setStyleSheet("""
+                background: rgba(88,101,242,0.18);
+                border-radius: 8px;
+                color: #e4e7ff;
+                font-size: 11px;
+                font-weight: bold;
+                border: none;
+            """)
+        top_row.addWidget(self._thumb)
+
+        # Info column
+        info_col = QVBoxLayout()
+        info_col.setContentsMargins(0, 0, 0, 0)
+        info_col.setSpacing(3)
+
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.setSpacing(8)
+        name = os.path.basename(path)
+        short = name if len(name) <= 28 else name[:25] + "…"
+        self._name_lbl = QLabel(short)
+        self._name_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.88); font-size: 13px; font-weight: 700; border: none;")
+        name_row.addWidget(self._name_lbl)
+
+        type_badge = QLabel(self._file_type)
+        type_badge.setFixedHeight(20)
+        type_badge.setStyleSheet("""
+            background: rgba(88,101,242,0.16);
+            color: #a5b4fc;
+            font-size: 10px;
+            font-weight: 600;
+            border-radius: 6px;
+            padding: 0px 8px;
+            border: none;
+        """)
+        name_row.addWidget(type_badge)
+        name_row.addStretch()
+        info_col.addLayout(name_row)
+
+        orig_size = _file_size_str(path)
+        self._size_lbl = QLabel(f"Original: {orig_size}")
+        self._size_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.42); font-size: 11px; border: none;")
+        info_col.addWidget(self._size_lbl)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(
+            "color: rgba(74,222,128,0.85); font-size: 11px; font-weight: 600; border: none;")
+        self._status_lbl.hide()
+        info_col.addWidget(self._status_lbl)
+
+        top_row.addLayout(info_col, 1)
+
+        # Target KB input column
+        target_col = QVBoxLayout()
+        target_col.setContentsMargins(0, 0, 0, 0)
+        target_col.setSpacing(3)
+
+        target_lbl = QLabel("Target")
+        target_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.30); font-size: 10px; border: none;")
+        target_lbl.setAlignment(Qt.AlignCenter)
+        target_col.addWidget(target_lbl)
+
+        self.target_input = QLineEdit()
+        self.target_input.setPlaceholderText("KB")
+        self.target_input.setFixedSize(72, 32)
+        self.target_input.setAlignment(Qt.AlignCenter)
+        self.target_input.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                color: white;
+                font-size: 12px;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QLineEdit:focus {
+                border-color: rgba(88,101,242,0.50);
+                background: rgba(88,101,242,0.08);
+            }
+        """)
+        target_col.addWidget(self.target_input)
+        top_row.addLayout(target_col)
+
+        # Remove button
+        self._remove_btn = QPushButton("✕")
+        self._remove_btn.setFixedSize(24, 24)
+        self._remove_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._remove_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.06);
+                border: none;
+                border-radius: 12px;
+                color: rgba(255,255,255,0.40);
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: rgba(255,82,82,0.20);
+                color: rgba(255,100,100,0.90);
+            }
+        """)
+        self._remove_btn.clicked.connect(lambda: self.removed.emit(self.path))
+        top_row.addWidget(self._remove_btn, 0, Qt.AlignTop)
+
+        outer.addLayout(top_row)
+
+        # ── Inline quality warning section (hidden by default) ─────────
+        self._warn_frame = QFrame()
+        self._warn_frame.setObjectName("warnFrame")
+        self._warn_frame.setStyleSheet("""
+            QFrame#warnFrame {
+                background: rgba(255, 196, 0, 0.07);
+                border: 1px solid rgba(255, 196, 0, 0.28);
+                border-radius: 12px;
+            }
+        """)
+        self._warn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        warn_layout = QVBoxLayout(self._warn_frame)
+        warn_layout.setContentsMargins(14, 12, 14, 12)
+        warn_layout.setSpacing(8)
+
+        # Title row
+        warn_title_row = QHBoxLayout()
+        warn_title_row.setSpacing(6)
+        warn_icon_lbl = QLabel("⚠️")
+        warn_icon_lbl.setStyleSheet("font-size: 14px; border: none; background: transparent;")
+        warn_title_row.addWidget(warn_icon_lbl)
+        warn_title_lbl = QLabel("Quality Warning")
+        warn_title_lbl.setStyleSheet(
+            "color: #ffc400; font-size: 12px; font-weight: 700; border: none; background: transparent;")
+        warn_title_row.addWidget(warn_title_lbl)
+        warn_title_row.addStretch()
+        warn_layout.addLayout(warn_title_row)
+
+        # Description
+        self._warn_desc = QLabel(
+            "This file cannot be compressed to the requested size without noticeable quality loss.")
+        self._warn_desc.setWordWrap(True)
+        self._warn_desc.setStyleSheet(
+            "color: rgba(255,255,255,0.65); font-size: 11px; border: none; background: transparent;")
+        warn_layout.addWidget(self._warn_desc)
+
+        # Sizes row
+        self._warn_sizes = QLabel()
+        self._warn_sizes.setWordWrap(True)
+        self._warn_sizes.setStyleSheet(
+            "color: rgba(255,255,255,0.55); font-size: 11px; border: none; background: transparent;")
+        warn_layout.addWidget(self._warn_sizes)
+
+        # Effects
+        effects_lbl = QLabel(
+            "Compressing further may cause:\n"
+            "  •  Blurry images\n"
+            "  •  Pixelation\n"
+            "  •  Distorted graphics\n"
+            "  •  Reduced PDF readability"
+        )
+        effects_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.42); font-size: 10px; border: none; background: transparent;")
+        warn_layout.addWidget(effects_lbl)
+
+        # Buttons
+        warn_btn_row = QHBoxLayout()
+        warn_btn_row.addStretch()
+        warn_btn_row.setSpacing(8)
+
+        self._warn_keep_btn = QPushButton("Keep Best Quality")
+        self._warn_keep_btn.setFixedHeight(32)
+        self._warn_keep_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._warn_keep_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(74,222,128,0.12);
+                border: 1px solid rgba(74,222,128,0.30);
+                border-radius: 8px;
+                color: rgba(74,222,128,0.90);
+                font-size: 11px;
+                font-weight: 600;
+                padding: 0px 14px;
+            }
+            QPushButton:hover {
+                background: rgba(74,222,128,0.22);
+                color: rgb(74,222,128);
+            }
+        """)
+        warn_btn_row.addWidget(self._warn_keep_btn)
+
+        self._warn_force_btn = QPushButton("Compress Anyway")
+        self._warn_force_btn.setFixedHeight(32)
+        self._warn_force_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._warn_force_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(248,113,113,0.10);
+                border: 1px solid rgba(248,113,113,0.28);
+                border-radius: 8px;
+                color: rgba(248,113,113,0.90);
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0px 14px;
+            }
+            QPushButton:hover {
+                background: rgba(248,113,113,0.20);
+                color: rgb(248,113,113);
+            }
+        """)
+        warn_btn_row.addWidget(self._warn_force_btn)
+        warn_layout.addLayout(warn_btn_row)
+
+        self._warn_frame.hide()
+        outer.addSpacing(8)
+        outer.addWidget(self._warn_frame)
+
+    # ── Public API ──────────────────────────────────────────────────
+    def get_target_kb(self):
+        """Return target KB as int, or None if invalid/empty."""
+        try:
+            v = int(self.target_input.text())
+            return v if v > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    def set_target_kb(self, kb):
+        self.target_input.setText(str(int(kb)))
+
+    def show_quality_warning(self, achieved_kb, target_kb, on_keep, on_force):
+        """Show the inline quality warning with action callbacks."""
+        self._warn_sizes.setText(
+            f"<b style='color:rgba(248,113,113,0.9)'>Requested Size:</b>  {target_kb:.0f} KB    "
+            f"<b style='color:rgba(74,222,128,0.9)'>Best Quality Size:</b>  {achieved_kb:.0f} KB"
+        )
+        # Disconnect old connections safely
+        try:
+            self._warn_keep_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        try:
+            self._warn_force_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self._warn_keep_btn.clicked.connect(on_keep)
+        self._warn_force_btn.clicked.connect(on_force)
+        self._warn_frame.show()
+        self.adjustSize()
+        # Notify parent container to re-layout
+        if self.parent():
+            self.parent().updateGeometry()
+
+    def hide_quality_warning(self):
+        """Hide the inline warning."""
+        self._warn_frame.hide()
+        self.adjustSize()
+        if self.parent():
+            self.parent().updateGeometry()
+
+    def set_status(self, status, text):
+        """Set card status: 'success', 'warning', 'error', or '' to clear."""
+        self.setProperty("status", status)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+        self._status_lbl.setText(text)
+        if status == "success":
+            self._status_lbl.setStyleSheet(
+                "color: rgba(74,222,128,0.85); font-size: 11px; font-weight: 600; border: none;")
+        elif status == "warning":
+            self._status_lbl.setStyleSheet(
+                "color: rgba(255,196,0,0.85); font-size: 11px; font-weight: 600; border: none;")
+        elif status == "error":
+            self._status_lbl.setStyleSheet(
+                "color: rgba(248,113,113,0.85); font-size: 11px; font-weight: 600; border: none;")
+        else:
+            self._status_lbl.hide()
+            return
+        self._status_lbl.show()
+
+    def mark_invalid_target(self, invalid=True):
+        """Highlight the target input as invalid."""
+        if invalid:
+            self.target_input.setStyleSheet("""
+                QLineEdit {
+                    background: rgba(248,113,113,0.10);
+                    border: 1px solid rgba(248,113,113,0.50);
+                    border-radius: 8px;
+                    color: #f87171;
+                    font-size: 12px;
+                }
+            """)
+        else:
+            self.target_input.setStyleSheet("""
+                QLineEdit {
+                    background: rgba(255,255,255,0.07);
+                    border: 1px solid rgba(255,255,255,0.12);
+                    border-radius: 8px;
+                    color: white;
+                    font-size: 12px;
+                    font-family: 'Segoe UI', sans-serif;
+                }
+                QLineEdit:focus {
+                    border-color: rgba(88,101,242,0.50);
+                    background: rgba(88,101,242,0.08);
+                }
+            """)
+
+    def set_compressing(self):
+        """Show in-progress state."""
+        self.hide_quality_warning()
+        self.set_status("", "")
+        self._status_lbl.setText("⏳ Compressing…")
+        self._status_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.45); font-size: 11px; font-weight: 600; border: none;")
+        self._status_lbl.show()
+        self.target_input.setEnabled(False)
+        self._remove_btn.setEnabled(False)
+
+
+# ── Drop zone container (manages cards) ─────────────────────────────
+
+class _CompressDropZone(QWidget):
+    """Card-based drop zone for the compress panel.
+
+    Each file gets its own card with a per-file target KB input.
+    Maintains the same public API as before for compatibility.
+    """
+    browse_clicked = pyqtSignal()
+    file_removed = pyqtSignal(str)   # emits path
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cards = {}       # path -> _CompressFileCard
+        self._card_order = []  # list of paths in insertion order
+
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumWidth(420)
+        self.setFixedHeight(self.preferred_height())
+
+        # Main layout
+        self._main_layout = QVBoxLayout(self)
+        self._main_layout.setContentsMargins(0, 0, 0, 0)
+        self._main_layout.setSpacing(0)
+
+        # ── Container frame with rounded corners ──
+        self._container = QFrame()
+        self._container.setObjectName("dropContainer")
+        self._container.setStyleSheet("""
+            QFrame#dropContainer {
+                background: #1e1e22;
+                border-radius: 20px;
+                border: 1px solid rgba(255,255,255,0.07);
+            }
+        """)
+        container_layout = QVBoxLayout(self._container)
+        container_layout.setContentsMargins(14, 12, 14, 12)
+        container_layout.setSpacing(8)
+
+        # ── Empty state ──
+        self._empty_widget = QWidget()
+        self._empty_widget.setFixedHeight(126)
+        self._empty_widget.setCursor(Qt.PointingHandCursor)
+        self._empty_widget.setStyleSheet("background: transparent; border: none;")
+        self._empty_widget.mousePressEvent = lambda e: self.browse_clicked.emit()
+        empty_layout = QVBoxLayout(self._empty_widget)
+        empty_layout.setContentsMargins(0, 0, 0, 0)
+        empty_layout.setSpacing(6)
+        empty_layout.setAlignment(Qt.AlignCenter)
+
+        # Icon
+        icon_frame = QFrame()
+        icon_frame.setFixedSize(46, 46)
+        icon_frame.setStyleSheet("""
+            background: rgba(88,101,242,0.18);
+            border-radius: 12px;
+            border: none;
+        """)
+        icon_lbl = QLabel("FILE")
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet(
+            "color: #e4e7ff; font-size: 10px; font-weight: bold; border: none;")
+        icon_inner = QVBoxLayout(icon_frame)
+        icon_inner.setContentsMargins(0, 0, 0, 0)
+        icon_inner.addWidget(icon_lbl)
+
+        title_lbl = QLabel("Drop images or PDFs here")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        title_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.85); font-size: 13px; font-weight: 700; border: none;")
+
+        sub_lbl = QLabel("or click to Browse")
+        sub_lbl.setAlignment(Qt.AlignCenter)
+        sub_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.40); font-size: 11px; border: none;")
+
+        empty_layout.addWidget(icon_frame, 0, Qt.AlignCenter)
+        empty_layout.addWidget(title_lbl)
+        empty_layout.addWidget(sub_lbl)
+        container_layout.addWidget(self._empty_widget)
+
+        # ── Scroll area for cards ──
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical {
+                background: transparent; width: 5px; margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255,255,255,0.12);
+                border-radius: 2px; min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255,255,255,0.22);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        """)
+
+        self._scroll_content = QWidget()
+        self._scroll_content.setStyleSheet("background: transparent; border: none;")
+        self._cards_layout = QVBoxLayout(self._scroll_content)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(8)
+        self._cards_layout.addStretch()
+
+        self._scroll.setWidget(self._scroll_content)
+        self._scroll.hide()
+        container_layout.addWidget(self._scroll)
+
+        self._main_layout.addWidget(self._container)
+
+    # ── Public API (compatible with old interface) ──────────────────
+    def preferred_height(self):
+        if not self._cards:
+            return 160
+        n = len(self._card_order)
+        # Use actual card heights (cards may expand when warning is shown)
+        total_card_h = sum(
+            self._cards[p].sizeHint().height() + 8
+            for p in self._card_order
+        )
+        # Show up to 4 cards without scrolling
+        visible = min(n, 4)
+        if n <= 4:
+            return 36 + total_card_h + 8
+        # If more than 4, cap to 4 card heights + scroll
+        visible_h = sum(
+            self._cards[p].sizeHint().height() + 8
+            for p in self._card_order[:4]
+        )
+        return 36 + visible_h + 8
+
+    def add_files(self, paths):
+        changed = False
+        for p in paths:
+            if p and p not in self._cards:
+                self._add_card(p)
+                changed = True
+        if changed:
+            self._sync_state()
+
+    def clear(self):
+        for path in list(self._card_order):
+            self._remove_card_widget(path)
+        self._cards.clear()
+        self._card_order.clear()
+        self._sync_state()
+
+    def get_files(self):
+        return list(self._card_order)
+
+    def get_file_targets(self):
+        """Return list of (path, target_kb) tuples. Returns None for target_kb if invalid."""
+        result = []
+        for p in self._card_order:
+            card = self._cards[p]
+            result.append((p, card.get_target_kb()))
+        return result
+
+    def set_all_targets(self, kb):
+        """Fill all card target inputs with the given KB value."""
+        for card in self._cards.values():
+            card.set_target_kb(kb)
+
+    def get_card(self, index):
+        """Get card by index."""
+        if 0 <= index < len(self._card_order):
+            return self._cards[self._card_order[index]]
+        return None
+
+    def get_card_by_path(self, path):
+        return self._cards.get(path)
+
+    def set_all_enabled(self, enabled):
+        """Enable/disable all card inputs and remove buttons."""
+        for card in self._cards.values():
+            card.target_input.setEnabled(enabled)
+            card._remove_btn.setEnabled(enabled)
+
+    # ── Internals ───────────────────────────────────────────────────
+    def _add_card(self, path):
+        preview = self._make_thumb(path)
+        card = _CompressFileCard(path, preview, parent=self._scroll_content)
+        card.removed.connect(self._on_card_removed)
+        self._cards[path] = card
+        self._card_order.append(path)
+        # Insert before the stretch
+        self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
+
+    def _on_card_removed(self, path):
+        self._remove_card_widget(path)
+        if path in self._cards:
+            del self._cards[path]
+        if path in self._card_order:
+            self._card_order.remove(path)
+        self._sync_state()
+        self.file_removed.emit(path)
+
+    def _remove_card_widget(self, path):
+        card = self._cards.get(path)
+        if card:
+            self._cards_layout.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+
+    def _sync_state(self):
+        has_files = bool(self._cards)
+        self._empty_widget.setVisible(not has_files)
+        self._scroll.setVisible(has_files)
+        h = self.preferred_height()
+        if self.height() != h:
+            self.setFixedHeight(h)
+
+    @staticmethod
+    def _make_thumb(path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff'):
+            try:
+                pil = Image.open(path)
+                pil.thumbnail((80, 80), Image.LANCZOS)
+                buf = io.BytesIO()
+                pil.save(buf, 'PNG')
+                px = QPixmap()
+                px.loadFromData(buf.getvalue())
+                return px
+            except Exception:
+                pass
+        return None
