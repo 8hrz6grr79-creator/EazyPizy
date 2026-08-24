@@ -5,13 +5,6 @@ import time
 import io
 
 from PIL import Image
-import numpy as np
-
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
 
 try:
     import keyboard
@@ -24,7 +17,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QLineEdit,
     QListWidget, QFrame, QMessageBox,
     QMenu, QAction, QProgressBar,
-    QSizePolicy, QSpinBox, QComboBox,
+    QSizePolicy, QComboBox,
     QDialog, QDialogButtonBox, QSlider,
     QScrollArea
 )
@@ -43,7 +36,7 @@ from ui.styles import (
     CLOSE_BTN_STYLE, MINIMIZE_BTN_STYLE, KB_PILL_STYLE, KB_INPUT_STYLE,
     ACTION_BTN_STYLE, SECONDARY_BTN_STYLE, HINT_STYLE,
     LIST_FRAME_STYLE, LIST_WIDGET_STYLE, PROGRESS_STYLE,
-    MENU_STYLE, SPINBOX_STYLE, COMBO_STYLE, PANEL_STYLE,
+    MENU_STYLE, COMBO_STYLE, PANEL_STYLE,
     SIDEBAR_STYLE, PDF_TOOL_BTN_STYLE,
     PDF_COMPACT_PANEL_STYLE, PDF_HEADER_STYLE, PDF_SUBTITLE_STYLE
 )
@@ -514,20 +507,13 @@ class ImageCompressor(QWidget):
         self.bar_ratio_combo.currentIndexChanged.connect(self._on_bar_ratio)
         cbl.addWidget(self.bar_ratio_combo)
         cbl.addWidget(make_divider())
-        self.crop_save_btn = QPushButton("✂  Crop & Save")
+        self.crop_save_btn = QPushButton("CROP")
         self.crop_save_btn.setFixedHeight(48)
         self.crop_save_btn.setMinimumWidth(130)
         self.crop_save_btn.setStyleSheet(ACTION_BTN_STYLE)
         self.crop_save_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.crop_save_btn.clicked.connect(self._do_crop_save)
         cbl.addWidget(self.crop_save_btn)
-        self.crop_reset_btn = QPushButton("↺")
-        self.crop_reset_btn.setFixedSize(48, 48)
-        self.crop_reset_btn.setToolTip("Reset crop")
-        self.crop_reset_btn.setStyleSheet(SECONDARY_BTN_STYLE)
-        self.crop_reset_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self.crop_reset_btn.clicked.connect(self._reset_crop)
-        cbl.addWidget(self.crop_reset_btn)
         self.crop_bar_controls.hide()
         bl.addWidget(self.crop_bar_controls)
 
@@ -882,21 +868,21 @@ class ImageCompressor(QWidget):
 
         # --- Rotate 90° buttons ---
         rot90_row = QHBoxLayout()
-        rot90_row.setSpacing(5)
-        self.rot90_ccw_btn = QPushButton(" 90° CCW")
+        rot90_row.setSpacing(6)
+        self.rot90_ccw_btn = QPushButton("")
         self.rot90_ccw_btn.setIcon(QIcon(os.path.join("assets", "icons", "rotate_ccw.png")))
-        self.rot90_ccw_btn.setIconSize(QSize(20, 20))
+        self.rot90_ccw_btn.setIconSize(QSize(28, 28))
         self.rot90_ccw_btn.setToolTip("Rotate 90° counter-clockwise")
-        self.rot90_ccw_btn.setFixedHeight(30)
+        self.rot90_ccw_btn.setFixedSize(78, 44)
         self.rot90_ccw_btn.setStyleSheet(SECONDARY_BTN_STYLE)
         self.rot90_ccw_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.rot90_ccw_btn.clicked.connect(self._rotate_90_ccw)
         rot90_row.addWidget(self.rot90_ccw_btn)
-        self.rot90_cw_btn = QPushButton(" 90° CW")
+        self.rot90_cw_btn = QPushButton("")
         self.rot90_cw_btn.setIcon(QIcon(os.path.join("assets", "icons", "rotate_cw.png")))
-        self.rot90_cw_btn.setIconSize(QSize(20, 20))
+        self.rot90_cw_btn.setIconSize(QSize(28, 28))
         self.rot90_cw_btn.setToolTip("Rotate 90° clockwise")
-        self.rot90_cw_btn.setFixedHeight(30)
+        self.rot90_cw_btn.setFixedSize(78, 44)
         self.rot90_cw_btn.setStyleSheet(SECONDARY_BTN_STYLE)
         self.rot90_cw_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.rot90_cw_btn.clicked.connect(self._rotate_90_cw)
@@ -905,12 +891,12 @@ class ImageCompressor(QWidget):
 
         # --- Flip buttons ---
         flip_row = QHBoxLayout()
-        flip_row.setSpacing(5)
+        flip_row.setSpacing(6)
         self.flip_h_btn = QPushButton("")
         self.flip_h_btn.setIcon(QIcon(os.path.join("assets", "icons", "flip_h.png")))
         self.flip_h_btn.setIconSize(QSize(28, 28))
         self.flip_h_btn.setToolTip("Flip horizontally (mirror)")
-        self.flip_h_btn.setFixedHeight(30)
+        self.flip_h_btn.setFixedSize(78, 44)
         self.flip_h_btn.setStyleSheet(SECONDARY_BTN_STYLE)
         self.flip_h_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.flip_h_btn.clicked.connect(self._flip_crop_h)
@@ -919,51 +905,68 @@ class ImageCompressor(QWidget):
         self.flip_v_btn.setIcon(QIcon(os.path.join("assets", "icons", "flip_v.png")))
         self.flip_v_btn.setIconSize(QSize(28, 28))
         self.flip_v_btn.setToolTip("Flip vertically")
-        self.flip_v_btn.setFixedHeight(30)
+        self.flip_v_btn.setFixedSize(78, 44)
         self.flip_v_btn.setStyleSheet(SECONDARY_BTN_STYLE)
         self.flip_v_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.flip_v_btn.clicked.connect(self._flip_crop_v)
         flip_row.addWidget(self.flip_v_btn)
         sbl.addLayout(flip_row)
 
-        # --- Auto Crop button ---
+        # --- Quick preset buttons ---
         sbl.addWidget(sep_widget())
-        sbl.addWidget(section_label("Smart Crop"))
-        self.auto_crop_btn = QPushButton("  Auto Crop")
-        self.auto_crop_btn.setIcon(QIcon(os.path.join("assets", "icons", "auto_crop.png")))
-        self.auto_crop_btn.setIconSize(QSize(22, 22))
-        self.auto_crop_btn.setToolTip("AI-powered auto crop — detects faces, subjects, and important regions")
-        self.auto_crop_btn.setFixedHeight(32)
-        self.auto_crop_btn.setStyleSheet(SECONDARY_BTN_STYLE)
-        self.auto_crop_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self.auto_crop_btn.clicked.connect(self._auto_crop)
-        sbl.addWidget(self.auto_crop_btn)
+        sbl.addWidget(section_label("Quick Presets"))
+        quick_row1 = QHBoxLayout()
+        quick_row1.setSpacing(6)
+        self.preset_passport_btn = QPushButton("")
+        self.preset_passport_btn.setIcon(QIcon(os.path.join("assets", "icons", "preset_passport.png")))
+        self.preset_passport_btn.setIconSize(QSize(28, 28))
+        self.preset_passport_btn.setToolTip("Passport (India) 35×45mm")
+        self.preset_passport_btn.setFixedSize(78, 44)
+        self.preset_passport_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.preset_passport_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.preset_passport_btn.clicked.connect(
+            lambda: self._select_preset_by_label("Passport (India) 35×45mm")
+        )
+        quick_row1.addWidget(self.preset_passport_btn)
+        self.preset_youtube_btn = QPushButton("")
+        self.preset_youtube_btn.setIcon(QIcon(os.path.join("assets", "icons", "preset_youtube.png")))
+        self.preset_youtube_btn.setIconSize(QSize(28, 28))
+        self.preset_youtube_btn.setToolTip("YouTube Thumbnail")
+        self.preset_youtube_btn.setFixedSize(78, 44)
+        self.preset_youtube_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.preset_youtube_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.preset_youtube_btn.clicked.connect(
+            lambda: self._select_preset_by_label("YouTube Thumbnail")
+        )
+        quick_row1.addWidget(self.preset_youtube_btn)
+        sbl.addLayout(quick_row1)
 
-        # --- Custom Ratio ---
-        sbl.addWidget(sep_widget())
-        self.custom_ratio_frame = QFrame()
-        self.custom_ratio_frame.setStyleSheet("background:transparent; border:none;")
-        cfl = QHBoxLayout(self.custom_ratio_frame)
-        cfl.setContentsMargins(0, 0, 0, 0)
-        cfl.setSpacing(4)
-        self.ratio_w = QSpinBox()
-        self.ratio_w.setRange(1, 99)
-        self.ratio_w.setValue(16)
-        self.ratio_h = QSpinBox()
-        self.ratio_h.setRange(1, 99)
-        self.ratio_h.setValue(9)
-        self.ratio_w.setStyleSheet(SPINBOX_STYLE)
-        self.ratio_h.setStyleSheet(SPINBOX_STYLE)
-        colon = QLabel("×")
-        colon.setStyleSheet("border:none; color:rgba(255,255,255,0.4); font-size:13px;")
-        cfl.addWidget(self.ratio_w)
-        cfl.addWidget(colon)
-        cfl.addWidget(self.ratio_h)
-        self.ratio_w.valueChanged.connect(self._apply_custom_ratio)
-        self.ratio_h.valueChanged.connect(self._apply_custom_ratio)
-        self.custom_ratio_frame.hide()
-        sbl.addWidget(section_label("Custom Ratio"))
-        sbl.addWidget(self.custom_ratio_frame)
+        quick_row2 = QHBoxLayout()
+        quick_row2.setSpacing(6)
+        self.preset_ig_story_btn = QPushButton("")
+        self.preset_ig_story_btn.setIcon(QIcon(os.path.join("assets", "icons", "preset_ig_story.png")))
+        self.preset_ig_story_btn.setIconSize(QSize(28, 28))
+        self.preset_ig_story_btn.setToolTip("Instagram Story")
+        self.preset_ig_story_btn.setFixedSize(78, 44)
+        self.preset_ig_story_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.preset_ig_story_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.preset_ig_story_btn.clicked.connect(
+            lambda: self._select_preset_by_label("Instagram Story")
+        )
+        quick_row2.addWidget(self.preset_ig_story_btn)
+        self.preset_x_btn = QPushButton("")
+        self.preset_x_btn.setIcon(QIcon(os.path.join("assets", "icons", "preset_x_post.png")))
+        self.preset_x_btn.setIconSize(QSize(28, 28))
+        self.preset_x_btn.setToolTip("X / Twitter Post")
+        self.preset_x_btn.setFixedSize(78, 44)
+        self.preset_x_btn.setStyleSheet(SECONDARY_BTN_STYLE)
+        self.preset_x_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.preset_x_btn.clicked.connect(
+            lambda: self._select_preset_by_label("X / Twitter Post")
+        )
+        quick_row2.addWidget(self.preset_x_btn)
+        sbl.addLayout(quick_row2)
+
         hint = QLabel("Scroll to zoom\nDouble-click to reset view")
         hint.setStyleSheet("color:rgba(255,255,255,0.18); font-size:10px; border:none;")
         sbl.addWidget(hint)
@@ -1685,7 +1688,6 @@ class ImageCompressor(QWidget):
             self.rotate_slider.setValue(0)
             self.rotate_angle_lbl.setText("0°")
             self.rotate_slider.blockSignals(False)
-            self.custom_ratio_frame.hide()
             self._clear_preset()
             self.hint.hide()
             self.crop_dim_lbl.show()
@@ -1706,13 +1708,8 @@ class ImageCompressor(QWidget):
         if data is None:
             return  # separator row
         ratio, preset_info = data
-        self.custom_ratio_frame.hide()
 
-        if ratio == "custom":
-            self.custom_ratio_frame.show()
-            self._apply_custom_ratio()
-            self._active_preset = None
-        elif ratio is None:
+        if ratio is None:
             # Free
             self.crop_canvas.set_aspect(None)
             self._active_preset = None
@@ -1724,17 +1721,14 @@ class ImageCompressor(QWidget):
                 self._active_preset = (
                     self.bar_ratio_combo.currentText(), pw, ph, cat
                 )
-                # Auto-crop if image loaded
-                if self.crop_path:
-                    if cat == "official":
-                        self._auto_crop_for_official()
-                    else:
-                        self._auto_crop()
             else:
                 self._active_preset = None
 
-    def _apply_custom_ratio(self):
-        self.crop_canvas.set_aspect((self.ratio_w.value(), self.ratio_h.value()))
+    def _select_preset_by_label(self, label):
+        """Select a crop preset in the ratio combo by its label text."""
+        idx = self.bar_ratio_combo.findText(label)
+        if idx >= 0:
+            self.bar_ratio_combo.setCurrentIndex(idx)
 
     def _reset_crop(self):
         self.bar_ratio_combo.blockSignals(True)
@@ -1742,7 +1736,6 @@ class ImageCompressor(QWidget):
         self.bar_ratio_combo.blockSignals(False)
         self.crop_canvas.set_aspect(None)
         self.crop_canvas.reset_zoom()
-        self.custom_ratio_frame.hide()
         self._clear_preset()
 
     def _on_rotate_slider(self, value):
@@ -1815,305 +1808,10 @@ class ImageCompressor(QWidget):
         new_angle = ((current + 90 + 180) % 360) - 180
         self.rotate_slider.setValue(new_angle)
 
-    # ── Auto Crop ────────────────────────────────────────────────────────
-    def _auto_crop(self):
-        """AI-powered auto crop: detect faces/subjects/saliency and position the crop box."""
-        if not self.crop_path:
-            return
-        if not HAS_CV2:
-            QMessageBox.warning(self, "Auto Crop",
-                                "OpenCV is not installed.\nRun: pip install opencv-python-headless")
-            return
-
-        pil = self.crop_canvas.get_pil_image()
-        if pil is None:
-            return
-
-        iw, ih = pil.width, pil.height
-        img_rgb = np.array(pil.convert("RGB"))
-        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-        MAX_DIM = 800
-        scale_factor = 1.0
-        if max(iw, ih) > MAX_DIM:
-            scale_factor = MAX_DIM / max(iw, ih)
-            small_gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor,
-                                    interpolation=cv2.INTER_AREA)
-        else:
-            small_gray = gray
-
-        roi = None
-
-        # Strategy 1: Face detection
-        try:
-            face_cascade = cv2.CascadeClassifier(
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
-            faces = face_cascade.detectMultiScale(
-                small_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-            )
-            if len(faces) > 0:
-                fx1 = min(f[0] for f in faces)
-                fy1 = min(f[1] for f in faces)
-                fx2 = max(f[0] + f[2] for f in faces)
-                fy2 = max(f[1] + f[3] for f in faces)
-                fx1 = int(fx1 / scale_factor)
-                fy1 = int(fy1 / scale_factor)
-                fx2 = int(fx2 / scale_factor)
-                fy2 = int(fy2 / scale_factor)
-                fw = fx2 - fx1
-                fh = fy2 - fy1
-                pad_x = int(fw * 0.6)
-                pad_y_top = int(fh * 0.5)
-                pad_y_bot = int(fh * 1.2)
-                roi = (
-                    max(0, fx1 - pad_x),
-                    max(0, fy1 - pad_y_top),
-                    min(iw, fx2 + pad_x) - max(0, fx1 - pad_x),
-                    min(ih, fy2 + pad_y_bot) - max(0, fy1 - pad_y_top),
-                )
-        except Exception:
-            pass
-
-        # Strategy 2: Upper-body / profile face
-        if roi is None:
-            try:
-                upper_cascade = cv2.CascadeClassifier(
-                    cv2.data.haarcascades + "haarcascade_upperbody.xml"
-                )
-                bodies = upper_cascade.detectMultiScale(
-                    small_gray, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50)
-                )
-                if len(bodies) > 0:
-                    bx1 = min(b[0] for b in bodies)
-                    by1 = min(b[1] for b in bodies)
-                    bx2 = max(b[0] + b[2] for b in bodies)
-                    by2 = max(b[1] + b[3] for b in bodies)
-                    bx1 = int(bx1 / scale_factor)
-                    by1 = int(by1 / scale_factor)
-                    bx2 = int(bx2 / scale_factor)
-                    by2 = int(by2 / scale_factor)
-                    pad = int((bx2 - bx1) * 0.3)
-                    roi = (
-                        max(0, bx1 - pad),
-                        max(0, by1 - pad),
-                        min(iw, bx2 + pad) - max(0, bx1 - pad),
-                        min(ih, by2 + pad) - max(0, by1 - pad),
-                    )
-            except Exception:
-                pass
-
-        # Strategy 3: Saliency / edge-energy map
-        if roi is None:
-            try:
-                roi = self._saliency_roi(gray, iw, ih)
-            except Exception:
-                pass
-
-        # Strategy 4: Center crop fallback
-        if roi is None:
-            roi = (0, 0, iw, ih)
-
-        aspect = self.crop_canvas._aspect
-        rx, ry, rw, rh = roi
-        if aspect:
-            aw, ah = float(aspect[0]), float(aspect[1])
-            target_ratio = aw / ah
-            roi_ratio = rw / max(1, rh)
-            if roi_ratio > target_ratio:
-                new_h = rw / target_ratio
-                if new_h <= ih:
-                    center_y = ry + rh / 2
-                    ry = max(0, center_y - new_h / 2)
-                    rh = new_h
-                    if ry + rh > ih:
-                        ry = ih - rh
-                else:
-                    rh = float(ih)
-                    rw = rh * target_ratio
-                    center_x = rx + roi[2] / 2
-                    rx = max(0, center_x - rw / 2)
-                    if rx + rw > iw:
-                        rx = iw - rw
-                    ry = 0
-            else:
-                new_w = rh * target_ratio
-                if new_w <= iw:
-                    center_x = rx + rw / 2
-                    rx = max(0, center_x - new_w / 2)
-                    rw = new_w
-                    if rx + rw > iw:
-                        rx = iw - rw
-                else:
-                    rw = float(iw)
-                    rh = rw / target_ratio
-                    center_y = ry + roi[3] / 2
-                    ry = max(0, center_y - rh / 2)
-                    if ry + rh > ih:
-                        ry = ih - rh
-                    rx = 0
-        else:
-            pad = int(min(rw, rh) * 0.08)
-            rx = max(0, rx - pad)
-            ry = max(0, ry - pad)
-            rw = min(iw - rx, rw + 2 * pad)
-            rh = min(ih - ry, rh + 2 * pad)
-
-        # Rule-of-thirds nudge for small crops
-        if rw < iw * 0.7 and rh < ih * 0.7:
-            thirds_x = iw / 3.0
-            roi_cx = rx + rw / 2.0
-            if roi_cx < iw / 2:
-                target_cx = thirds_x
-            else:
-                target_cx = 2 * thirds_x
-            shift_x = target_cx - (rx + rw / 2.0)
-            shift_x = max(-iw * 0.1, min(iw * 0.1, shift_x))
-            new_rx = rx + shift_x
-            if new_rx >= 0 and new_rx + rw <= iw:
-                rx = new_rx
-
-        rx = max(0, int(rx))
-        ry = max(0, int(ry))
-        rw = max(1, min(int(rw), iw - rx))
-        rh = max(1, min(int(rh), ih - ry))
-
-        self.crop_canvas.set_crop_coords(rx, ry, rw, rh)
-        self.crop_canvas._emit()
-
-    @staticmethod
-    def _saliency_roi(gray, iw, ih):
-        """Compute a saliency-based region of interest using edge energy."""
-        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        mag = np.sqrt(gx ** 2 + gy ** 2)
-        mag = (mag / (mag.max() + 1e-8) * 255).astype(np.uint8)
-        blur_size = max(3, min(iw, ih) // 8) | 1
-        blurred = cv2.GaussianBlur(mag, (blur_size, blur_size), 0)
-        thresh_val = np.percentile(blurred, 70)
-        _, mask = cv2.threshold(blurred, int(thresh_val), 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-        top = contours[:min(5, len(contours))]
-        all_pts = np.vstack(top)
-        bx, by, bw, bh = cv2.boundingRect(all_pts)
-        pad = int(min(bw, bh) * 0.15)
-        return (
-            max(0, bx - pad),
-            max(0, by - pad),
-            min(iw, bx + bw + pad) - max(0, bx - pad),
-            min(ih, by + bh + pad) - max(0, by - pad),
-        )
-
     # ── Preset helpers ───────────────────────────────────────────────────
     def _clear_preset(self):
         """Clear active preset tracking."""
         self._active_preset = None
-
-    def _auto_crop_for_official(self):
-        """Face-centered auto-crop optimised for passport/visa/ID photos."""
-        if not self.crop_path or not HAS_CV2:
-            self._auto_crop()
-            return
-
-        pil = self.crop_canvas.get_pil_image()
-        if pil is None:
-            return
-
-        iw, ih = pil.width, pil.height
-        img_rgb = np.array(pil.convert("RGB"))
-        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-        MAX_DIM = 800
-        scale_factor = 1.0
-        if max(iw, ih) > MAX_DIM:
-            scale_factor = MAX_DIM / max(iw, ih)
-            small_gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor,
-                                    interpolation=cv2.INTER_AREA)
-        else:
-            small_gray = gray
-
-        roi = None
-        try:
-            face_cascade = cv2.CascadeClassifier(
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
-            faces = face_cascade.detectMultiScale(
-                small_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-            )
-            if len(faces) > 0:
-                faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-                fx, fy, fw, fh = faces[0]
-                fx = int(fx / scale_factor)
-                fy = int(fy / scale_factor)
-                fw = int(fw / scale_factor)
-                fh = int(fh / scale_factor)
-                head_pad_top = int(fh * 0.70)
-                head_pad_bot = int(fh * 0.50)
-                head_pad_x = int(fw * 0.40)
-                roi = (
-                    max(0, fx - head_pad_x),
-                    max(0, fy - head_pad_top),
-                    min(iw, fx + fw + head_pad_x) - max(0, fx - head_pad_x),
-                    min(ih, fy + fh + head_pad_bot) - max(0, fy - head_pad_top),
-                )
-        except Exception:
-            pass
-
-        if roi is None:
-            self._auto_crop()
-            return
-
-        aspect = self.crop_canvas._aspect
-        rx, ry, rw, rh = roi
-        if aspect:
-            aw, ah = float(aspect[0]), float(aspect[1])
-            target_ratio = aw / ah
-            roi_ratio = rw / max(1, rh)
-            if roi_ratio > target_ratio:
-                new_h = rw / target_ratio
-                if new_h <= ih:
-                    center_y = ry + rh / 2
-                    ry = max(0, center_y - new_h / 2)
-                    rh = new_h
-                    if ry + rh > ih:
-                        ry = ih - rh
-                else:
-                    rh = float(ih)
-                    rw = rh * target_ratio
-                    center_x = rx + roi[2] / 2
-                    rx = max(0, center_x - rw / 2)
-                    if rx + rw > iw:
-                        rx = iw - rw
-                    ry = 0
-            else:
-                new_w = rh * target_ratio
-                if new_w <= iw:
-                    center_x = rx + rw / 2
-                    rx = max(0, center_x - new_w / 2)
-                    rw = new_w
-                    if rx + rw > iw:
-                        rx = iw - rw
-                else:
-                    rw = float(iw)
-                    rh = rw / target_ratio
-                    center_y = ry + roi[3] / 2
-                    ry = max(0, center_y - rh / 2)
-                    if ry + rh > ih:
-                        ry = ih - rh
-                    rx = 0
-
-        rx = max(0, int(rx))
-        ry = max(0, int(ry))
-        rw = max(1, min(int(rw), iw - rx))
-        rh = max(1, min(int(rh), ih - ry))
-
-        self.crop_canvas.set_crop_coords(rx, ry, rw, rh)
-        self.crop_canvas._emit()
 
     def _do_crop_save(self):
         if not self.crop_path:

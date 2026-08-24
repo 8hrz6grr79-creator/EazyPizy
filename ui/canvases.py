@@ -527,8 +527,8 @@ class CropCanvas(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         cw, ch = self.width(), self.height()
 
-        # 1. Dark canvas background
-        p.fillRect(0, 0, cw, ch, QColor(28, 28, 32))
+        # 1. Checkerboard canvas background (so transparent image areas are visible)
+        checkerboard_paint(p, cw, ch)
 
         if self._frame.isEmpty():
             return

@@ -1,123 +1,214 @@
 import io
+import os
 import threading
 
-import requests
+import numpy as np
+import onnxruntime as ort
 from PyQt5.QtCore import QObject, pyqtSignal
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 # =========================================
-# REMOVE.BG API CONFIG
+# LOCAL MODEL CONFIG (BiRefNet-portrait, ONNX)
 # =========================================
 
-REMOVEBG_API_KEY = "CbNW5M78qjongaz9M8ojWQ9v"
-REMOVEBG_ENDPOINT = "https://api.remove.bg/v1.0/removebg"
+# Point this at wherever you keep the .onnx file. Ship it alongside your
+# app (e.g. in a "models/" folder next to the executable) rather than
+# downloading it at runtime.
+MODEL_PATH = os.environ.get(
+    "BIREFNET_MODEL_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "BiRefNet-portrait.onnx"),
+)
 
-# How long to wait for the API before giving up (seconds)
-REQUEST_TIMEOUT = 60
+# BiRefNet expects a fixed square input. 1024 is the standard resolution
+# the released weights were trained/exported at — don't shrink this for
+# "preview" mode, it hurts hair/edge quality a lot. Downscale the *output*
+# instead (see BgRemoveWorker below).
+INPUT_SIZE = 1024
+
+# Feather radius applied to the mask before compositing, in pixels.
+# Keeps hair edges from looking like a hard cutout. 0 disables it.
+MASK_FEATHER_RADIUS = 1.5
 
 
 # =========================================
-# WARMUP
+# MODEL LOADING (singleton, loaded once)
 # =========================================
-# Kept for drop-in compatibility with main_window.py, which imports and
-# calls warmup_remover() on a background thread shortly after launch.
-# There's no local model to load anymore, so this just does a lightweight
-# sanity check against the remove.bg account endpoint (and silently
-# no-ops on any failure — the real error will surface on first actual use).
 
+_session = None
+_session_lock = threading.Lock()
 _remover_ready = threading.Event()
 
 
+def _get_session():
+    global _session
+    if _session is None:
+        with _session_lock:
+            if _session is None:  # re-check inside lock
+                if not os.path.exists(MODEL_PATH):
+                    raise RuntimeError(
+                        f"Model file not found at {MODEL_PATH}. "
+                        f"Download BiRefNet-portrait.onnx and place it there, "
+                        f"or set BIREFNET_MODEL_PATH."
+                    )
+                providers = ort.get_available_providers()
+                # Prefer GPU if present, fall back to CPU automatically.
+                preferred = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in providers]
+
+                # Trim ONNX Runtime's own memory overhead. The arena
+                # allocator and memory-pattern optimizer both trade RAM
+                # for speed — worth disabling on low-RAM / universal
+                # targets, at a small (usually low double-digit ms) cost
+                # per inference call.
+                sess_options = ort.SessionOptions()
+                sess_options.enable_mem_pattern = False
+                sess_options.enable_cpu_mem_arena = False
+                sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+
+                _session = ort.InferenceSession(
+                    MODEL_PATH, sess_options=sess_options, providers=preferred or ["CPUExecutionProvider"]
+                )
+    return _session
+
+
 def warmup_remover():
+    """
+    Optional pre-load of the ONNX model into memory, so the first real
+    removal call isn't slowed down by disk I/O and session init.
+
+    NOT called automatically anymore — loading the model costs real RAM
+    (roughly 500MB-1GB depending on platform/provider), which isn't free
+    to hold for the whole app lifetime on lower-spec machines. Call this
+    yourself at a point where the user has shown intent to actually use
+    the feature (e.g. when they open the editor screen or pick an image),
+    not unconditionally at app launch.
+    """
     try:
-        requests.get(
-            "https://api.remove.bg/v1.0/account",
-            headers={"X-Api-Key": REMOVEBG_API_KEY},
-            timeout=10,
-        )
+        _get_session()
     except Exception:
+        # Real error will surface on first actual use via the worker's
+        # error signal — this is just a best-effort warmup.
         pass
     finally:
         _remover_ready.set()
 
 
-# =========================================
-# CORE API CALL
-# =========================================
-
-def _remove_bg_via_api(pil_image, size="auto", bg_color=None):
+def unload_remover():
     """
-    Sends a PIL image to the remove.bg API and returns an RGBA PIL image
-    with the background removed.
+    Frees the loaded model from memory. Call this when the user leaves
+    the editor, the app is minimized/idle for a while, or you otherwise
+    want to give the RAM back. The next removal call will transparently
+    reload the model (with the usual first-call delay).
     """
-    buf = io.BytesIO()
-    pil_image.save(buf, format="PNG")
-    buf.seek(0)
+    global _session
+    with _session_lock:
+        _session = None
+    _remover_ready.clear()
 
-    data = {"size": size}
-    if bg_color is not None:
-        # remove.bg accepts a hex color and will composite server-side
-        data["bg_color"] = bg_color
 
-    response = requests.post(
-        REMOVEBG_ENDPOINT,
-        files={"image_file": ("image.png", buf, "image/png")},
-        data=data,
-        headers={"X-Api-Key": REMOVEBG_API_KEY},
-        timeout=REQUEST_TIMEOUT,
-    )
-
-    if response.status_code == requests.codes.ok:
-        result = Image.open(io.BytesIO(response.content))
-        return result.convert("RGBA") if bg_color is None else result.convert("RGB")
-
-    # Try to surface remove.bg's own error message
-    try:
-        err_json = response.json()
-        errors = err_json.get("errors", [])
-        msg = "; ".join(e.get("title", str(e)) for e in errors) or response.text
-    except Exception:
-        msg = response.text or f"HTTP {response.status_code}"
-
-    raise RuntimeError(f"remove.bg API error ({response.status_code}): {msg}")
+def is_remover_loaded():
+    return _session is not None
 
 
 # =========================================
-# BG REMOVE WORKER  (remove.bg API — preview)
+# CORE INFERENCE
+# =========================================
+
+def _run_mask(pil_image_rgb):
+    """
+    Runs BiRefNet on a PIL RGB image and returns a single-channel PIL
+    mask (mode 'L'), resized back to the original image's dimensions.
+    """
+    session = _get_session()
+    orig_size = pil_image_rgb.size  # (w, h)
+
+    resized = pil_image_rgb.resize((INPUT_SIZE, INPUT_SIZE), Image.LANCZOS)
+    arr = np.array(resized).astype(np.float32) / 255.0
+    arr = (arr - 0.5) / 0.5  # normalize to [-1, 1]
+    arr = arr.transpose(2, 0, 1)[None, :].astype(np.float32)  # NCHW
+
+    input_name = session.get_inputs()[0].name
+    output = session.run(None, {input_name: arr})[0]
+
+    mask = output[0]
+    if mask.ndim == 3:
+        mask = mask[0]
+    mask = np.clip(mask, 0, 1)
+    mask = (mask * 255).astype(np.uint8)
+
+    mask_img = Image.fromarray(mask, mode="L").resize(orig_size, Image.LANCZOS)
+
+    if MASK_FEATHER_RADIUS > 0:
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(MASK_FEATHER_RADIUS))
+
+    return mask_img
+
+
+def _remove_bg_local(pil_image_rgb, bg_color=None):
+    """
+    Runs local background removal and returns a composited PIL image:
+    - RGBA (transparent background) if bg_color is None
+    - RGB (flattened onto bg_color) otherwise
+    """
+    mask_img = _run_mask(pil_image_rgb)
+
+    if bg_color is None:
+        result = pil_image_rgb.convert("RGBA")
+        result.putalpha(mask_img)
+        return result
+
+    # Composite onto a solid background color, e.g. (255, 255, 255)
+    bg = Image.new("RGB", pil_image_rgb.size, bg_color)
+    result = Image.composite(pil_image_rgb, bg, mask_img)
+    return result
+
+
+# =========================================
+# BG REMOVE WORKER  (preview — fast look)
 # =========================================
 
 class BgRemoveWorker(QObject):
     finished = pyqtSignal(object, object)
     error    = pyqtSignal(str)
+    # Emitted with a short status string so the UI can show *why* it's
+    # taking a moment, instead of looking frozen/broken on first use.
+    # Stages: "loading_model" -> "processing" (loading_model is skipped
+    # entirely on every call after the first, once the session is cached).
+    status = pyqtSignal(str)
 
     def __init__(self, path, remover=None):
         super().__init__()
         self.path = path
-        # 'remover' is no longer a loaded model — kept only so the call
-        # signature in main_window.py doesn't need to change.
+        # 'remover' kept only so the call signature in main_window.py
+        # doesn't need to change; the model is now a lazily-loaded
+        # module-level singleton instead.
         self.remover = remover
 
     def run(self):
         try:
+            if not is_remover_loaded():
+                self.status.emit("loading_model")
+                _get_session()  # first-call cost: disk read + session init
+
+            self.status.emit("processing")
+
             orig = Image.open(self.path).convert("RGB")
 
-            # Downscale before upload — faster round-trip and uses the
-            # cheaper "preview" tier of the API for the initial look.
-            MAX_PREVIEW = 1200
+            # Downscale before inference for a faster preview. Quality
+            # takes a real hit below ~600px on the long edge, so don't
+            # go smaller than that just to save time.
+            MAX_PREVIEW = 800
             preview = orig.copy()
             if max(preview.size) > MAX_PREVIEW:
                 preview.thumbnail((MAX_PREVIEW, MAX_PREVIEW), Image.LANCZOS)
 
-            result = _remove_bg_via_api(preview, size="preview")
+            result = _remove_bg_local(preview)
 
             # second value is just a sentinel now (kept for compatibility
             # with code that stashes it as self.bg_remover)
-            self.finished.emit(result, "removebg-api")
+            self.finished.emit(result, "birefnet-local")
 
-        except requests.exceptions.RequestException as e:
-            self.error.emit(f"Network error contacting remove.bg: {e}")
         except Exception as ex:
             self.error.emit(str(ex))
 
@@ -128,9 +219,7 @@ class BgRemoveWorker(QObject):
 
 class BgRemoveSaveWorker(QObject):
     """
-    Re-runs background removal at full original resolution for export,
-    via the remove.bg API's "auto" size tier (uses higher-res output
-    when the account plan allows it).
+    Re-runs background removal at full original resolution for export.
     """
     finished = pyqtSignal(object)   # emits full-size RGBA/RGB PIL
     error    = pyqtSignal(str)
@@ -145,16 +234,12 @@ class BgRemoveSaveWorker(QObject):
         try:
             orig = Image.open(self.path).convert("RGB")
 
-            hex_color = None
+            rgb_color = None
             if self.bg_color is not None:
-                hex_color = "{:02x}{:02x}{:02x}".format(
-                    self.bg_color.red(), self.bg_color.green(), self.bg_color.blue()
-                )
+                rgb_color = (self.bg_color.red(), self.bg_color.green(), self.bg_color.blue())
 
-            result = _remove_bg_via_api(orig, size="auto", bg_color=hex_color)
+            result = _remove_bg_local(orig, bg_color=rgb_color)
             self.finished.emit(result)
 
-        except requests.exceptions.RequestException as e:
-            self.error.emit(f"Network error contacting remove.bg: {e}")
         except Exception as ex:
             self.error.emit(str(ex))

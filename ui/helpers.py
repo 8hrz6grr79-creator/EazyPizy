@@ -46,8 +46,6 @@ CROP_PRESETS = [
     ("Visa Photo 35×45mm",        (35, 45),       (413, 531, 300)),
     ("ID Card Photo 1:1",         (1, 1),         None),
     ("Aadhaar Photo 35×45mm",     (35, 45),       (413, 531, 300)),
-    ("sep",                       "sep",          None),
-    ("Custom",                    "custom",       None),
 ]
 
 # Backward-compat alias (main_window still imports ASPECT_RATIOS in some paths)
