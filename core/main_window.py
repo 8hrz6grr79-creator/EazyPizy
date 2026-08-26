@@ -884,6 +884,10 @@ class ImageCompressor(QWidget):
         if not self._bg_thread_is_running():
             self.crop_canvas.unload()
             self.bg_canvas.clear()
+            self.bgremove_remove_btn.setEnabled(False)
+            self.bgremove_remove_btn.setText("REMOVE")
+            self.bgremove_save_btn.setEnabled(False)
+            self.bgremove_save_btn.setText("SAVE")
         self.crop_panel.hide()
         self.bgremove_panel.hide()
         self._bg_sidebar.hide()
@@ -2060,7 +2064,7 @@ class ImageCompressor(QWidget):
             self.crop_save_btn.setText("✓  Saved!")
             QApplication.processEvents()
             time.sleep(0.8)
-            self.crop_save_btn.setText("✂  Crop & Save")
+            self.crop_save_btn.setText("CROP")
         except Exception as ex:
             QMessageBox.critical(self, "Save failed", str(ex))
 
@@ -2936,6 +2940,10 @@ class ImageCompressor(QWidget):
         if not self._bg_thread_is_running():
             self.crop_canvas.unload()
             self.bg_canvas.clear()
+            self.bgremove_remove_btn.setEnabled(False)
+            self.bgremove_remove_btn.setText("REMOVE")
+            self.bgremove_save_btn.setEnabled(False)
+            self.bgremove_save_btn.setText("SAVE")
         self.crop_panel.hide()
         self.bgremove_panel.hide()
         self._bg_sidebar.hide()
