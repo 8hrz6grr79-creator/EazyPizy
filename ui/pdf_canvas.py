@@ -819,8 +819,12 @@ class OrganizePdfCanvas(QWidget):
         for path in paths:
             if not path or os.path.splitext(path)[1].lower() != ".pdf":
                 continue
-            if path not in self._files:
-                self._files.append(path)
+            if path in self._files:
+                # Already loaded — skip re-rendering/re-appending its pages
+                # to avoid duplicating thumbnails (and the memory they use)
+                # every time the same file is dropped/browsed again.
+                continue
+            self._files.append(path)
             page_count = self._page_count(path)
             thumbs = self._render_thumbnails(path, page_count)
             for page_index in range(page_count):

@@ -38,6 +38,11 @@ QPushButton:checked {
     border-color: rgba(88,101,242,0.50);
     color: #a5b4fc;
 }
+QPushButton:disabled {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.05);
+    color: rgba(255,255,255,0.22);
+}
 """
 
 ICON_BTN_STYLE = """

@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import io
+import socket
 
 from PIL import Image
 
@@ -25,7 +26,7 @@ from PyQt5.QtCore import (
     Qt, QPoint, QSize, QPointF, QRect, QRectF,
     QPropertyAnimation, QEasingCurve,
     pyqtSignal, pyqtSlot, QThread, QMetaObject, Q_ARG,
-    QTimer
+    QTimer, QObject
 )
 from PyQt5.QtGui import QColor, QIcon, QPixmap, QCursor, QPainter, QPen, QBrush, QLinearGradient, QFont, QFontMetrics
 
@@ -43,13 +44,13 @@ from ui.styles import (
 from ui.helpers import (
     WIN_W, PANEL_H, CROP_PRESETS,
     make_divider, make_icon_btn, make_wm_btn,
-    sep_widget, section_label, spin_col
+    sep_widget, section_label, spin_col, grey_icon_path
 )
 from ui.canvases import CropCanvas, BgCanvas
 from ui.pdf_canvas import PdfDropCanvas  # used by pdf_panel
 from ui.pdf_panel import PdfToolPanel
 from tools.compress.logic import CompressWorker
-from tools.background_remove.logic import BgRemoveWorker, warmup_remover
+from tools.background_remove.logic import BgRemoveWorker
 
 
 # =========================================
@@ -281,8 +282,76 @@ class _AlphaBar(QWidget):
 
 
 # =========================================
+# NETWORK MONITOR
+# =========================================
+# BG Remove now depends on the remove.bg API, which needs an internet
+# connection. This polls connectivity on a background thread (a quick raw
+# socket connect, not a full HTTP request) and reports changes via a Qt
+# signal so the UI thread can enable/disable the feature accordingly.
+
+class NetworkMonitor(QObject):
+    status_changed = pyqtSignal(bool)   # True = online, False = offline
+
+    CHECK_HOST = "8.8.8.8"   # Google DNS — fast, reliable, no HTTP overhead
+    CHECK_PORT = 53
+    CHECK_TIMEOUT = 2.0      # seconds
+    POLL_INTERVAL = 5.0      # seconds between checks
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_flag = threading.Event()
+        self._last_status = None
+        self._thread = None
+
+    @staticmethod
+    def _check_once():
+        try:
+            socket.setdefaulttimeout(NetworkMonitor.CHECK_TIMEOUT)
+            with socket.create_connection(
+                (NetworkMonitor.CHECK_HOST, NetworkMonitor.CHECK_PORT),
+                timeout=NetworkMonitor.CHECK_TIMEOUT
+            ):
+                return True
+        except OSError:
+            return False
+
+    def _run(self):
+        while not self._stop_flag.is_set():
+            online = self._check_once()
+            if online != self._last_status:
+                self._last_status = online
+                self.status_changed.emit(online)
+            self._stop_flag.wait(self.POLL_INTERVAL)
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_flag.set()
+
+
+# =========================================
 # MAIN WINDOW
 # =========================================
+
+class _NullHintLabel:
+    """No-op stand-in for the old 'Drop images anywhere...' hint label.
+
+    The hint text below the top bar has been removed. Rather than hunting
+    down and editing the ~28 scattered self.hint.show()/.hide()/.setText()
+    calls throughout this file, this object just swallows them silently —
+    nothing is ever actually shown.
+    """
+    def show(self): pass
+    def hide(self): pass
+    def setText(self, *a, **k): pass
+    def setAlignment(self, *a, **k): pass
+    def setStyleSheet(self, *a, **k): pass
+    def isVisible(self): return False
+
 
 class ImageCompressor(QWidget):
 
@@ -308,6 +377,7 @@ class ImageCompressor(QWidget):
         self.mode          = self.MODE_COMPRESS
         self.crop_path     = None
         self.bgremove_path = None
+        self._bgremove_done = False   # True only after an actual removal has run
         self.oldPos        = QPoint()
         self._anim         = None
         self._thread       = None
@@ -323,12 +393,22 @@ class ImageCompressor(QWidget):
         self._tray            = []   # [{"path": str, "type": "image"|"pdf"}]
         self._bg_sidebar_rel  = None   # QPoint: sidebar pos relative to main window top-left
         self._drag_reset_sidebar = False  # True once sidebar has been reset for current drag
+
+        # "Idealized state": if the window stays hidden (via the Insert
+        # hotkey) for 5s straight, release the memory-heavy canvases
+        # (Crop / Bg Remove) rather than holding a full-res image in RAM
+        # indefinitely while the app isn't even visible. A quick re-press
+        # of Insert within the 5s window cancels this — see
+        # toggle_visibility() / _enter_idealized_state() / _exit_idealized_state().
+        self._idealize_timer = QTimer(self)
+        self._idealize_timer.setSingleShot(True)
+        self._idealize_timer.timeout.connect(self._enter_idealized_state)
+        self._is_idealized = False
+
         self.hide()          # hide before setup_ui so processEvents() never shows it
         self.setup_ui()
         self.toggle_signal.connect(self.toggle_visibility)
         self.bg_remover = None
-        # Delay warmup by 5s so it does not compete with app launch or first Insert show
-        QTimer.singleShot(5000, lambda: threading.Thread(target=warmup_remover, daemon=True).start())
 
         if HAS_KEYBOARD:
             def _listen():
@@ -354,17 +434,100 @@ class ImageCompressor(QWidget):
         self._scan_server.start()
         self._update_scan_btn_tooltip()
 
+        # BG Remove needs internet (remove.bg API) — monitor connectivity
+        # and enable/disable that tool accordingly.
+        self._is_online = True   # optimistic until first check completes
+        self._net_monitor = NetworkMonitor(self)
+        self._net_monitor.status_changed.connect(self._on_network_status_changed)
+        self._net_monitor.start()
+
+    def _on_network_status_changed(self, online):
+        self._is_online = online
+
+        mode_btn = self._mode_btns.get(self.MODE_BGREMOVE)
+        if mode_btn is not None:
+            mode_btn.setEnabled(online)
+            mode_btn.setToolTip(
+                "BG Remove" if online else "BG Remove — requires an internet connection"
+            )
+            icon_path = self._mode_btn_icons.get(self.MODE_BGREMOVE, "")
+            if not online:
+                path = grey_icon_path(icon_path)
+                if not os.path.exists(path):
+                    path = icon_path   # fall back to the normal icon if grey asset is missing
+            else:
+                path = icon_path
+            if os.path.exists(path):
+                mode_btn.setIcon(QIcon(path))
+                mode_btn.setIconSize(QSize(28, 28))
+
+        if hasattr(self, 'bgremove_remove_btn'):
+            # Only re-enable Remove if we're not mid-removal already
+            running = self._bg_thread is not None and self._bg_thread_is_running()
+            self.bgremove_remove_btn.setEnabled(online and not running and bool(self.bgremove_path) and not self._bgremove_done)
+            if not online:
+                self.bgremove_remove_btn.setToolTip("No internet connection")
+            else:
+                self.bgremove_remove_btn.setToolTip("")
+
+        # If we're offline and currently sitting in BG Remove mode with
+        # nothing loaded, bounce back to Compress rather than leaving the
+        # user stuck on a dead tool.
+        if not online and self.mode == self.MODE_BGREMOVE and self.bgremove_path is None:
+            self._switch_mode(self.MODE_COMPRESS)
+
     def toggle_visibility(self):
         if self.isVisible():
             self.hide()
             if hasattr(self, '_bg_sidebar'):
                 self._bg_sidebar.hide()
+            # Start the 5s debounce — only actually release memory if the
+            # window is still hidden when the timer fires.
+            self._idealize_timer.start(5000)
         else:
+            # Re-shown before 5s elapsed: nothing was released, just cancel.
+            self._idealize_timer.stop()
+            if self._is_idealized:
+                # Already idealized (was hidden 5s+) — reload whatever the
+                # active tool needs before the window becomes visible again.
+                self._exit_idealized_state()
             self.show()
             self.activateWindow()
             self.raise_()
             if self.bgremove_panel.isVisible():
                 QTimer.singleShot(50, self._show_bg_sidebar)
+
+    # ------------------------------------------------------------------
+    # IDEALIZED STATE — release memory after 5s hidden via Insert
+    # ------------------------------------------------------------------
+    def _enter_idealized_state(self):
+        """Fired 5s after the window was hidden, if it's still hidden.
+
+        Releases the memory-heavy Crop and Bg Remove canvases. Crop is
+        always safe to release — reloading it just re-decodes the local
+        file (any unsaved crop position/rotation/zoom will reset).
+        Bg Remove is only released if nothing has been removed yet: an
+        already-removed result cost a remove.bg API call, so we don't
+        want the user to silently pay for that call again just because
+        the window sat hidden for a few seconds.
+        """
+        if self.isVisible():
+            return  # re-shown right as the timer fired — nothing to do
+        self._is_idealized = True
+
+        if not self._bg_thread_is_running():
+            self.crop_canvas.unload()
+            if not self._bgremove_done:
+                self.bg_canvas.clear()
+
+    def _exit_idealized_state(self):
+        """Reload whatever the currently active tool needs, right before
+        the window becomes visible again after having been idealized."""
+        self._is_idealized = False
+        if self.mode == self.MODE_CROP and self.crop_path:
+            self._load_crop_image(self.crop_path)
+        elif self.mode == self.MODE_BGREMOVE and self.bgremove_path and not self._bgremove_done:
+            self._preview_bgremove_source(self.bgremove_path)
 
     # ------------------------------------------------------------------
     # UI SETUP
@@ -425,6 +588,7 @@ class ImageCompressor(QWidget):
 
         # Mode pill buttons
         self._mode_btns = {}
+        self._mode_btn_icons = {}   # mode_id -> normal icon path (for grey-swap on disable)
         modes = [
             (self.MODE_COMPRESS, "Compress",  "assets/icons/compress.png"),
             (self.MODE_CROP,     "Crop",      "assets/icons/crop.png"),
@@ -446,6 +610,7 @@ class ImageCompressor(QWidget):
             btn.clicked.connect(lambda checked, m=mode_id: self._switch_mode(m))
             bl.addWidget(btn)
             self._mode_btns[mode_id] = btn
+            self._mode_btn_icons[mode_id] = icon_path
         self._mode_btns[self.MODE_COMPRESS].setChecked(True)
 
         bl.addWidget(make_divider())
@@ -523,11 +688,19 @@ class ImageCompressor(QWidget):
         bgl = QHBoxLayout(self.bgremove_bar_controls)
         bgl.setContentsMargins(0, 0, 0, 0)
         bgl.setSpacing(5)
-        self.bgremove_save_btn = QPushButton("💾  Save Result")
+        self.bgremove_remove_btn = QPushButton("REMOVE")
+        self.bgremove_remove_btn.setFixedHeight(48)
+        self.bgremove_remove_btn.setMinimumWidth(110)
+        self.bgremove_remove_btn.setStyleSheet(ACTION_BTN_STYLE)
+        self.bgremove_remove_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.bgremove_remove_btn.clicked.connect(self._trigger_bgremove)
+        bgl.addWidget(self.bgremove_remove_btn)
+        self.bgremove_save_btn = QPushButton("SAVE")
         self.bgremove_save_btn.setFixedHeight(48)
         self.bgremove_save_btn.setMinimumWidth(130)
         self.bgremove_save_btn.setStyleSheet(ACTION_BTN_STYLE)
         self.bgremove_save_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.bgremove_save_btn.setEnabled(False)   # nothing removed yet
         self.bgremove_save_btn.clicked.connect(self._bgremove_save)
         bgl.addWidget(self.bgremove_save_btn)
         self.bgremove_bar_controls.hide()
@@ -615,10 +788,10 @@ class ImageCompressor(QWidget):
         self._outer.addLayout(bar_row)
 
     def _build_hint(self):
-        self.hint = QLabel("Drop images anywhere  ·  0 files loaded")
-        self.hint.setAlignment(Qt.AlignCenter)
-        self.hint.setStyleSheet(HINT_STYLE)
-        self._outer.addWidget(self.hint)
+        # The "Drop images anywhere..." hint label has been removed.
+        # self.hint is kept as a no-op so the many existing
+        # .show()/.hide()/.setText() calls elsewhere stay valid.
+        self.hint = _NullHintLabel()
 
     def _build_tray(self):
         pass  # tray is now the files_btn dropdown in the toolbar
@@ -702,8 +875,15 @@ class ImageCompressor(QWidget):
         self.files = []
         self.crop_path = None
         self.bgremove_path = None
+        self._bgremove_done = False
         self._bgremove_result = None
         self.file_list.clear()
+        # Release any full-resolution image data held by the crop/bg-remove
+        # canvases — otherwise it stays resident in memory even though
+        # nothing on screen references it anymore.
+        if not self._bg_thread_is_running():
+            self.crop_canvas.unload()
+            self.bg_canvas.clear()
         self.crop_panel.hide()
         self.bgremove_panel.hide()
         self._bg_sidebar.hide()
@@ -734,7 +914,7 @@ class ImageCompressor(QWidget):
             if self._bg_thread_is_running():
                 return
             self._bgremove_result = None   # discard any cached result for the old image
-            self._load_bgremove(path)
+            self._preview_bgremove_source(path)
         elif self.mode == self.MODE_PDF and self._active_pdf_tool:
             self._pdf_panels[self._active_pdf_tool].add_files([path])
 
@@ -1488,6 +1668,15 @@ class ImageCompressor(QWidget):
         # sb is a floating window — NOT added to layout
         self._outer.addWidget(self.bgremove_panel)
 
+    def _reveal_bg_sidebar(self):
+        """Show/reposition the bg-color sidebar. Call this once the window's
+        resize animation has actually finished, not before — positioning
+        depends on the panel's final geometry."""
+        if self._bg_sidebar.isVisible():
+            self._position_bg_sidebar()
+        else:
+            self._show_bg_sidebar()
+
     def _position_bg_sidebar(self):
         """Position sidebar as a floating window to the right of the main window."""
 
@@ -1583,7 +1772,7 @@ class ImageCompressor(QWidget):
                 self.hint.hide()
                 self.crop_dim_lbl.show()
                 self.crop_panel.show()
-                self._animate_size(self.bar.height() or 80 + 10 + PANEL_H)
+                self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
             elif imgs:
                 self._load_crop_image(imgs[-1])
             else:
@@ -1595,23 +1784,42 @@ class ImageCompressor(QWidget):
             if self._bgremove_result is not None:
                 pil_rgba, src_rgb = self._bgremove_result
                 self._bgremove_result = None
+                self.hint.hide()
                 self._apply_bgremove_result(pil_rgba, src_rgb)
-            # If the worker is still running, just show the in-progress hint
+            # If the worker is still running, restore the panel + in-progress state
             elif self._bg_thread is not None and self._bg_thread_is_running():
-                self.hint.setText("⏳  Removing background…")
-            # Canvas already has a result — restore the panel instantly, no re-run
-            elif self.bg_canvas._base_pix is not None and self.bgremove_path is not None:
                 self.hint.hide()
                 self.bgremove_panel.show()
-                self._animate_size(self.bar.height() or 80 + 10 + PANEL_H)
-                QTimer.singleShot(50, self._show_bg_sidebar)
+                self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
+                self._anim.finished.connect(self._reveal_bg_sidebar)
+                self.bgremove_remove_btn.setEnabled(False)
+                self.bgremove_remove_btn.setText("REMOVING\u2026")
+                self.bgremove_save_btn.setEnabled(False)
+            # Already removed — restore instantly, sidebar included, no re-run
+            elif self._bgremove_done and self.bg_canvas._base_pix is not None and self.bgremove_path is not None:
+                self.hint.hide()
+                self.bgremove_panel.show()
+                self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
+                self._anim.finished.connect(self._reveal_bg_sidebar)
+                self.bgremove_remove_btn.setEnabled(False)
+                self.bgremove_remove_btn.setText("REMOVE")
+                self.bgremove_save_btn.setEnabled(True)
+            # Preview-only (loaded but not yet removed) — restore instantly, sidebar included
+            elif self.bgremove_path is not None and self.bg_canvas._base_pix is not None:
+                self.hint.hide()
+                self.bgremove_panel.show()
+                self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
+                self._anim.finished.connect(self._reveal_bg_sidebar)
+                self.bgremove_remove_btn.setEnabled(True)
+                self.bgremove_remove_btn.setText("REMOVE")
+                self.bgremove_save_btn.setEnabled(False)
             else:
-                # Nothing loaded yet — load from tray if available
+                # Nothing loaded yet — load from tray if available, as a preview only
                 self.bgremove_path = None
-                self.hint.setText("Drop an image  ·  background will be removed automatically")
+                self.hint.setText("Drop an image  ·  then click Remove")
                 imgs = [e["path"] for e in self._tray if e["type"] == "image"]
                 if imgs:
-                    self._load_bgremove(imgs[-1])
+                    self._preview_bgremove_source(imgs[-1])
         elif mode == self.MODE_PDF:
             self.pdf_bar_controls.show()
             for btn in self._pdf_tool_btns.values():
@@ -1696,7 +1904,7 @@ class ImageCompressor(QWidget):
             for p in self._pdf_panels.values():
                 p.hide()
             self.crop_panel.show()
-            self._animate_size(self.bar.height() or 80 + 10 + PANEL_H)
+            self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
         except Exception as ex:
             QMessageBox.critical(self, "Load error", str(ex))
 
@@ -1862,16 +2070,50 @@ class ImageCompressor(QWidget):
     # BG REMOVE
     # ------------------------------------------------------------------
 
-    def _load_bgremove(self, path):
+    def _preview_bgremove_source(self, path):
+        """Show the original image as-is — no removal runs until the user
+        clicks the Remove button."""
+        if self._bg_thread_is_running():
+            return
+        try:
+            orig = Image.open(path).convert("RGB")
+        except Exception:
+            return
         self.bgremove_path = path
-        self.hint.show()
-        self.hint.setText("⏳  Removing background…")
-        self.bgremove_panel.hide()
-        self._bg_sidebar.hide()
+        self._bgremove_done = False
+        self._bgremove_result = None
+
+        self.hint.hide()
         self.crop_panel.hide()
         for p in self._pdf_panels.values():
             p.hide()
-        self._animate_size(self.bar.height() or 80)
+
+        # Show as a fully-opaque preview — nothing has been removed yet
+        self.bg_canvas.set_image(orig.convert("RGBA"), orig)
+        self.bg_canvas.set_bg_color(None)
+        self.bgremove_panel.show()
+        self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
+        self._anim.finished.connect(self._reveal_bg_sidebar)
+
+        self.bgremove_remove_btn.setEnabled(True)
+        self.bgremove_remove_btn.setText("REMOVE")
+        self.bgremove_save_btn.setEnabled(False)
+
+    def _trigger_bgremove(self):
+        """User clicked Remove — actually run background removal now."""
+        if not self.bgremove_path or self._bg_thread_is_running():
+            return
+        if not getattr(self, '_is_online', True):
+            QMessageBox.warning(self, "No internet connection",
+                "Background removal needs an internet connection to reach the remove.bg API.")
+            return
+        self._load_bgremove(self.bgremove_path)
+
+    def _load_bgremove(self, path):
+        self.bgremove_path = path
+        self.bgremove_remove_btn.setEnabled(False)
+        self.bgremove_remove_btn.setText("REMOVING\u2026")
+        self.bgremove_save_btn.setEnabled(False)
 
         self._bg_thread = QThread(self)
         self._bg_worker = BgRemoveWorker(
@@ -1883,6 +2125,7 @@ class ImageCompressor(QWidget):
         self._bg_worker.finished.connect(self._on_bgremove_done)
         self._bg_worker.error.connect(self._on_bgremove_error)
         self._bg_worker.finished.connect(self._bg_thread.quit)
+        self._bg_worker.error.connect(self._bg_thread.quit)
         self._bg_thread.finished.connect(self._bg_worker.deleteLater)
         self._bg_thread.finished.connect(self._bg_thread.deleteLater)
         self._bg_thread.start()
@@ -1910,6 +2153,9 @@ class ImageCompressor(QWidget):
 
     def _on_bgremove_done(self, pil_rgba, remover):
         self.bg_remover = remover
+        self._bgremove_done = True
+        self.bgremove_remove_btn.setEnabled(False)
+        self.bgremove_remove_btn.setText("REMOVE")
         try:
             src_rgb = Image.open(self.bgremove_path).convert("RGB")
         except Exception:
@@ -1922,6 +2168,7 @@ class ImageCompressor(QWidget):
         self._apply_bgremove_result(pil_rgba, src_rgb)
 
     def _apply_bgremove_result(self, pil_rgba, src_rgb):
+        self.bgremove_save_btn.setEnabled(True)
         self.bg_canvas.set_image(pil_rgba, src_rgb)
         for btn in self._swatch_btns:
             btn.setChecked(False)
@@ -1934,12 +2181,8 @@ class ImageCompressor(QWidget):
         self._bg_img_thumb_pix = None
         self.hint.hide()
         self.bgremove_panel.show()
-        self._animate_size(self.bar.height() or 80 + 10 + PANEL_H)
-        # Preserve sidebar if already shown, just reposition
-        if self._bg_sidebar.isVisible():
-            self._position_bg_sidebar()
-        else:
-            QTimer.singleShot(50, self._show_bg_sidebar)
+        self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
+        self._anim.finished.connect(self._reveal_bg_sidebar)
 
     def _show_bg_sidebar(self):
         self._bg_sidebar.show()
@@ -1951,10 +2194,12 @@ class ImageCompressor(QWidget):
             self._bg_swatches_scroll.verticalScrollBar().setValue(0)
 
     def _on_bgremove_error(self, msg):
-        self.hint.show()
-        self.hint.setText("Drop an image  ·  background will be removed automatically")
+        self.bgremove_remove_btn.setEnabled(True)
+        self.bgremove_remove_btn.setText("REMOVE")
         QMessageBox.critical(self, "Error",
-            f"Background removal failed:\n{msg}\n\nMake sure rembg is installed:\npip install rembg")
+            f"Background removal failed:\n{msg}\n\n"
+            "Make sure REMOVEBG_API_KEY is set and you have an internet "
+            "connection to reach the remove.bg API.")
 
     # ------------------------------------------------------------------
     # CUSTOM COLOR — SV square / hue bar / alpha bar handlers
@@ -2211,7 +2456,7 @@ class ImageCompressor(QWidget):
             self.bgremove_save_btn.setText("✓  Saved!")
             QApplication.processEvents()
             time.sleep(0.8)
-            self.bgremove_save_btn.setText("💾  Save Result")
+            self.bgremove_save_btn.setText("SAVE")
         except Exception as ex:
             QMessageBox.critical(self, "Save failed", str(ex))
 
@@ -2281,7 +2526,7 @@ class ImageCompressor(QWidget):
                 card.set_compressing()
 
         self.compress_btn.setEnabled(False)
-        self.compress_btn.setText("\u23f3  Compressing\u2026")
+        self.compress_btn.setText("COMPRESSING\u2026")
         self.add_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
         self.progress_bar.setMaximum(len(files_with_targets))
@@ -2375,7 +2620,7 @@ class ImageCompressor(QWidget):
         for p in list(self.files):
             self._scan_temps.discard(p)
         self.compress_btn.setEnabled(True)
-        self.compress_btn.setText("\u26a1  Compress")
+        self.compress_btn.setText("COMPRESS")
         self.add_btn.setEnabled(True)
         self.clear_btn.setEnabled(True)
         self.progress_bar.hide()
@@ -2608,7 +2853,7 @@ class ImageCompressor(QWidget):
 
         # UI: mark buttons/progress
         self.compress_btn.setEnabled(False)
-        self.compress_btn.setText("\u23f3  Force compressing\u2026")
+        self.compress_btn.setText("FORCE COMPRESSING\u2026")
         self.add_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
         self.progress_bar.setMaximum(len(files_with_targets))
@@ -2660,7 +2905,7 @@ class ImageCompressor(QWidget):
     def _on_force_all_done(self):
         """All force compressions finished."""
         self.compress_btn.setEnabled(True)
-        self.compress_btn.setText("\u26a1  Compress")
+        self.compress_btn.setText("COMPRESS")
         self.add_btn.setEnabled(True)
         self.clear_btn.setEnabled(True)
         self.progress_bar.hide()
@@ -2681,9 +2926,16 @@ class ImageCompressor(QWidget):
         self.files = []
         self.crop_path = None
         self.bgremove_path = None
+        self._bgremove_done = False
         self._bgremove_result = None
         self.file_list.clear()
         self.compress_canvas.clear()
+        # Release any full-resolution image data held by the crop/bg-remove
+        # canvases — otherwise it stays resident in memory even though
+        # nothing on screen references it anymore.
+        if not self._bg_thread_is_running():
+            self.crop_canvas.unload()
+            self.bg_canvas.clear()
         self.crop_panel.hide()
         self.bgremove_panel.hide()
         self._bg_sidebar.hide()
@@ -2857,6 +3109,8 @@ class ImageCompressor(QWidget):
             pass
 
     def closeEvent(self, e):
+        if getattr(self, '_net_monitor', None):
+            self._net_monitor.stop()
         if self._scan_server:
             self._scan_server.stop()
         self._delete_scan_temps()
@@ -3260,7 +3514,11 @@ class _CompressFileCard(QFrame):
         warn_layout.addLayout(warn_btn_row)
 
         self._warn_frame.hide()
-        outer.addSpacing(8)
+        self._warn_spacer = QWidget()
+        self._warn_spacer.setFixedHeight(8)
+        self._warn_spacer.setStyleSheet("background: transparent; border: none;")
+        self._warn_spacer.hide()
+        outer.addWidget(self._warn_spacer)
         outer.addWidget(self._warn_frame)
 
     # ── Public API ──────────────────────────────────────────────────
@@ -3292,6 +3550,7 @@ class _CompressFileCard(QFrame):
             pass
         self._warn_keep_btn.clicked.connect(on_keep)
         self._warn_force_btn.clicked.connect(on_force)
+        self._warn_spacer.show()
         self._warn_frame.show()
         self.adjustSize()
         # Notify parent container to re-layout
@@ -3301,6 +3560,7 @@ class _CompressFileCard(QFrame):
     def hide_quality_warning(self):
         """Hide the inline warning."""
         self._warn_frame.hide()
+        self._warn_spacer.hide()
         self.adjustSize()
         if self.parent():
             self.parent().updateGeometry()
@@ -3493,13 +3753,13 @@ class _CompressDropZone(QWidget):
         # Show up to 4 cards without scrolling
         visible = min(n, 4)
         if n <= 4:
-            return 36 + total_card_h + 8
+            return 24 + total_card_h
         # If more than 4, cap to 4 card heights + scroll
         visible_h = sum(
             self._cards[p].sizeHint().height() + 8
             for p in self._card_order[:4]
         )
-        return 36 + visible_h + 8
+        return 24 + visible_h
 
     def add_files(self, paths):
         changed = False
@@ -3557,6 +3817,8 @@ class _CompressDropZone(QWidget):
         self._card_order.append(path)
         # Insert before the stretch
         self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
+        card.adjustSize()
+        self._cards_layout.activate()
 
     def _on_card_removed(self, path):
         self._remove_card_widget(path)
@@ -3578,6 +3840,10 @@ class _CompressDropZone(QWidget):
         has_files = bool(self._cards)
         self._empty_widget.setVisible(not has_files)
         self._scroll.setVisible(has_files)
+        # Only reserve gutter space for the scrollbar when it's actually shown
+        needs_scroll = len(self._card_order) > 4
+        self._cards_layout.setContentsMargins(0, 0, 8 if needs_scroll else 0, 0)
+        self._cards_layout.activate()
         h = self.preferred_height()
         if self.height() != h:
             self.setFixedHeight(h)

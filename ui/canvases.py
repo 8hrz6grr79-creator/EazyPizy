@@ -126,6 +126,30 @@ class CropCanvas(QWidget):
         self.update()
         self._emit()
 
+    def unload(self):
+        """Release all loaded image data (full-res + display copies).
+
+        CropCanvas is created once and kept alive for the whole app
+        session, so without this the full-resolution `_pil_original`
+        (and the smaller display/rotate copies) stay resident in memory
+        indefinitely after the user is done cropping — even after
+        clicking Clear or switching to another tool. Call this whenever
+        the loaded image is no longer needed.
+        """
+        self._pil                  = None
+        self._pil_original         = None
+        self._pil_display          = None
+        self._pil_display_original = None
+        self._pil_rotate_original  = None
+        self._pix                  = None
+        self._pending_angle        = 0
+        self._frame     = QRectF()
+        self._img_off_x = 0.0
+        self._img_off_y = 0.0
+        self._img_scale = 1.0
+        self._xzoom     = 1.0
+        self.update()
+
     def set_aspect(self, aspect):
         self._aspect = aspect
         if aspect:
@@ -527,6 +551,15 @@ class CropCanvas(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         cw, ch = self.width(), self.height()
 
+        # 0. Clip everything to the panel's left-side rounding (20px, matches
+        #    PANEL_STYLE) — right corners stay square since the sidebar sits there.
+        radius = 20
+        panel_clip = QPainterPath()
+        panel_clip.addRoundedRect(QRectF(0, 0, cw, ch), radius, radius)
+        right_square = QPainterPath()
+        right_square.addRect(QRectF(cw - radius, 0, radius, ch))
+        p.setClipPath(panel_clip.united(right_square))
+
         # 1. Checkerboard canvas background (so transparent image areas are visible)
         checkerboard_paint(p, cw, ch)
 
@@ -540,7 +573,7 @@ class CropCanvas(QWidget):
         p.save()
         clip = QPainterPath()
         clip.addRect(r)
-        p.setClipPath(clip)
+        p.setClipPath(clip, Qt.IntersectClip)
         p.drawPixmap(img.toRect(), self._pix, self._pix.rect())
         p.restore()
 
@@ -550,7 +583,7 @@ class CropCanvas(QWidget):
         outside.addRect(QRectF(0, 0, cw, ch))
         inside  = QPainterPath()
         inside.addRect(r)
-        p.setClipPath(outside.subtracted(inside))
+        p.setClipPath(outside.subtracted(inside), Qt.IntersectClip)
         p.drawPixmap(img.toRect(), self._pix, self._pix.rect())
         p.fillRect(0, 0, cw, ch, QColor(18, 18, 22, 168))
         p.restore()
@@ -805,6 +838,30 @@ QPushButton:checked{ background: rgba(88,101,242,0.45); }
         self._base_pix.loadFromData(buf.read())
         self._transform_visible = True   # show handles immediately on first load
         self._reset_transform()
+        self.update()
+
+    def clear(self):
+        """Release all loaded image data (subject + original source).
+
+        BgCanvas is created once and kept alive for the whole app
+        session, so without this the full-resolution `_orig_rgba` /
+        `_orig_source` images stay resident in memory indefinitely after
+        the user is done — even after clicking Clear or switching to
+        another tool. Call this whenever the loaded image is no longer
+        needed.
+        """
+        self._orig_rgba    = None
+        self._orig_source  = None
+        self._subject_bbox = None
+        self._bg_img_pix   = None
+        self._bg_img_pil   = None
+        self._base_pix     = None
+        self._transform_visible = False
+        self._cx = 0.0
+        self._cy = 0.0
+        self._sw = 0.0
+        self._sh = 0.0
+        self._angle = 0.0
         self.update()
 
     def _reset_transform(self):

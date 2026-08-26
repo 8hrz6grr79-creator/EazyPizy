@@ -1124,6 +1124,12 @@ class PdfToolPanel(QFrame):
 
     def _on_done(self, msg):
         self._set_status(msg, err=False)
+        if self.tool_id == "organize" and getattr(self, "canvas", None) is not None:
+            # The organized PDF has been written to disk — the loaded
+            # pages/thumbnails aren't needed anymore, so release them
+            # rather than holding every page's thumbnail in memory for
+            # the rest of the session.
+            self.canvas.clear()
         self._sync_action_state()
 
     def _on_err(self, err):

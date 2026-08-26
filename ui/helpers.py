@@ -62,6 +62,17 @@ def make_divider():
     return d
 
 
+def grey_icon_path(icon_path):
+    """Given 'assets/icons/bgremove.png', return 'assets/icons/bgremove_grey.png'.
+
+    Used to swap a mode button's icon to its greyed-out counterpart when
+    the tool is disabled (e.g. BG Remove while offline), instead of just
+    disabling the button and leaving the full-color icon showing.
+    """
+    base, ext = os.path.splitext(icon_path)
+    return f"{base}_grey{ext}"
+
+
 def make_icon_btn(icon_path, tooltip, fallback_text="", size=48):
     btn = QPushButton()
     btn.setToolTip(tooltip)
