@@ -4,155 +4,20 @@ from PIL import Image
 
 from PyQt5.QtWidgets import (
     QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QSpinBox, QSizePolicy, QDialog, QLineEdit, QWidget, QCheckBox
+    QFileDialog, QSizePolicy, QLineEdit, QWidget, QCheckBox, QComboBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QCursor, QColor, QPainter, QPen, QBrush, QFont
+from PyQt5.QtGui import QCursor, QPixmap
 
 from ui.styles import (
     ACTION_BTN_STYLE, SECONDARY_BTN_STYLE,
-    SPINBOX_STYLE, PDF_LABEL_STYLE, PDF_STATUS_OK, PDF_STATUS_ERR,
-    PDF_COMPACT_PANEL_STYLE, PDF_HEADER_STYLE, PDF_SUBTITLE_STYLE
+    PDF_LABEL_STYLE, PDF_STATUS_OK, PDF_STATUS_ERR,
+    PDF_COMPACT_PANEL_STYLE, PDF_HEADER_STYLE, PDF_SUBTITLE_STYLE,
+    COMBO_STYLE
 )
-from ui.helpers import section_label, sep_widget
+from ui.helpers import sep_widget, section_label
 from ui.pdf_canvas import PdfDropCanvas, OrganizePdfCanvas
 from tools.pdf_tools.logic import PdfWorker
-
-
-# ---------------------------------------------------------------------------
-# Password strength helpers (used by Protect PDF panel)
-# ---------------------------------------------------------------------------
-
-def _password_strength(pw: str) -> int:
-    """Return a strength score 0-4 for a given password string.
-
-    Score levels:
-        0 — empty
-        1 — weak   (< 6 chars)
-        2 — fair   (6-9 chars, or meets some criteria)
-        3 — good   (10+ chars with mixed types)
-        4 — strong (12+ chars with upper+lower+digit+symbol)
-    """
-    if not pw:
-        return 0
-    n = len(pw)
-    has_upper  = any(c.isupper()  for c in pw)
-    has_lower  = any(c.islower()  for c in pw)
-    has_digit  = any(c.isdigit()  for c in pw)
-    has_symbol = any(not c.isalnum() for c in pw)
-    variety = sum([has_upper, has_lower, has_digit, has_symbol])
-    if n < 6:
-        return 1
-    if n < 10 or variety < 2:
-        return 2
-    if n < 12 or variety < 3:
-        return 3
-    return 4
-
-
-class _PasswordStrengthBar(QWidget):
-    """A thin progress bar that shows password strength with color coding."""
-
-    _COLORS = [
-        None,                        # 0: empty — no bar
-        QColor(239, 68,  68),        # 1: weak   — red
-        QColor(249, 115, 22),        # 2: fair   — orange
-        QColor(234, 179,  8),        # 3: good   — yellow
-        QColor( 74, 222, 128),       # 4: strong — green
-    ]
-    _LABELS = ["", "Weak", "Fair", "Good", "Strong"]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._score = 0
-        self._match = None   # None = unchecked, True = match, False = mismatch
-        self.setFixedHeight(14)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def set_state(self, score: int, match):
-        self._score = max(0, min(4, score))
-        self._match = match
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-
-        # Background track
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 18))
-        painter.drawRoundedRect(0, 2, w, h - 4, 3, 3)
-
-        if self._score > 0:
-            fill_w = int(w * self._score / 4)
-            color = self._COLORS[self._score]
-            # Mismatch override: tint red even if score is high
-            if self._match is False:
-                color = QColor(239, 68, 68)
-            painter.setBrush(color)
-            painter.drawRoundedRect(0, 2, fill_w, h - 4, 3, 3)
-
-            # Label
-            font = QFont()
-            font.setPointSize(8)
-            painter.setFont(font)
-            label = self._LABELS[self._score]
-            if self._match is False:
-                label = "Mismatch"
-            elif self._match is True:
-                label = self._LABELS[self._score] + " ✓"
-            painter.setPen(QColor(255, 255, 255, 160))
-            from PyQt5.QtCore import QRect
-            painter.drawText(QRect(0, 0, w, h), Qt.AlignRight | Qt.AlignVCenter, label)
-
-
-class ExpandedWorkspaceDialog(QDialog):
-    def __init__(self, title, workspace, actions, parent=None):
-        super().__init__(parent)
-        self.workspace = workspace
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.resize(1100, 760)
-        self.setStyleSheet(PDF_COMPACT_PANEL_STYLE + """
-            QDialog {
-                background: #1e1e22;
-            }
-        """)
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 16)
-        outer.setSpacing(10)
-
-        header = QFrame()
-        header.setStyleSheet("background: transparent; border: none;")
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setSpacing(8)
-
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(PDF_HEADER_STYLE)
-        hl.addWidget(title_lbl)
-        hl.addStretch(1)
-
-        for text, slot, primary in actions:
-            btn = QPushButton(text)
-            btn.setFixedHeight(34)
-            btn.setCursor(QCursor(Qt.PointingHandCursor))
-            btn.setStyleSheet(ACTION_BTN_STYLE if primary else SECONDARY_BTN_STYLE)
-            btn.clicked.connect(slot)
-            hl.addWidget(btn)
-
-        close_btn = QPushButton("Close")
-        close_btn.setFixedHeight(34)
-        close_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        close_btn.setStyleSheet(SECONDARY_BTN_STYLE)
-        close_btn.clicked.connect(self.accept)
-        hl.addWidget(close_btn)
-
-        outer.addWidget(header)
-        outer.addWidget(sep_widget())
-        outer.addWidget(workspace)
 
 
 # =========================================
@@ -164,40 +29,53 @@ class PdfToolPanel(QFrame):
 
     TOOL_TITLES = {
         "img2pdf": "Image to PDF",
-        "pdf2img": "PDF to Images",
         "merge": "Merge PDF",
-        "split": "Split PDF",
-        "compress": "Compress PDF",
         "organize": "Organize PDF",
         "protect": "Protect PDF",
     }
 
     TOOL_GLYPHS = {
         "img2pdf": "IMG",
-        "pdf2img": "PDF",
         "merge": "PDF",
-        "split": "PDF",
-        "compress": "PDF",
         "organize": "A/B",
         "protect": "🔒",
     }
+
+    # Drop image files here with these exact names (either extension works,
+    # svg preferred) to swap the Organize / Protect header badges over from
+    # the text glyphs above to real icons. Any tool without a matching file
+    # here just keeps using its TOOL_GLYPHS text as before.
+    #   Fastutil/assets/icons/organizer.svg  (or organizer.png)
+    #   Fastutil/assets/icons/protect.svg    (or protect.png)
+    ICONS_DIR = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "assets", "icons"
+    )
+    # Maps tool_id -> icon filename stem. Only listed here because "organize"
+    # the tool_id and "organizer" the icon file don't match.
+    ICON_FILENAMES = {"organize": "organizer", "protect": "protect"}
 
     def __init__(self, tool_id, parent=None):
         super().__init__(parent)
         self.tool_id = tool_id
         self.setObjectName("pdfCompactPanel")
         self.setStyleSheet(PDF_COMPACT_PANEL_STYLE)
-        self.setFixedWidth(820 if tool_id == "organize" else 760)
+        # img2pdf/merge need extra width to fit 4 cards per row (was 3 at 760px).
+        # 840, not 820: once the vertical scrollbar appears (5+ files) it eats
+        # ~12-16px off the grid's width, which was just enough to tip the
+        # column math back down to 3 — the wider panel keeps a buffer so 4
+        # columns hold whether or not the scrollbar is showing.
+        panel_widths = {"organize": 820, "img2pdf": 840, "merge": 840}
+        self.setFixedWidth(panel_widths.get(tool_id, 760))
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._thread = None
         self._worker = None
         self._go_btn = None
         self._status = None
         self._fade_anim = None
+        self._page_size_combo = None  # Img->PDF specific
         # Protect-PDF specific widgets
         self._pw_input = None
         self._pw_confirm = None
-        self._pw_strength = None
         self._overwrite_chk = None
         self._protect_file_card = None  # QFrame shown when a file is loaded
         self._protect_drop_area = None  # QFrame shown when no file is loaded
@@ -218,10 +96,7 @@ class PdfToolPanel(QFrame):
         else:
             canvas_cfg = {
                 "img2pdf": dict(accept_images=True, accept_pdfs=False),
-                "pdf2img": dict(accept_images=False, accept_pdfs=True),
                 "merge": dict(accept_images=False, accept_pdfs=True),
-                "split": dict(accept_images=False, accept_pdfs=True),
-                "compress": dict(accept_images=False, accept_pdfs=True),
             }
             if tool_id == "organize":
                 self.canvas = OrganizePdfCanvas()
@@ -268,6 +143,34 @@ class PdfToolPanel(QFrame):
     # _run_entry_animation intentionally removed — it was the root cause of
     # the transparency flash.  See showEvent comment above.
 
+    def _tool_icon_pixmap(self, tool_id, size=16):
+        """Look for {icon_stem}.svg or .png (any case) in ICONS_DIR and
+        return it scaled to `size`, or None if no icon file exists yet for
+        this tool."""
+        icon_stem = self.ICON_FILENAMES.get(tool_id)
+        if icon_stem is None:
+            return None
+        if not os.path.isdir(self.ICONS_DIR):
+            return None
+
+        candidates = []
+        for fname in os.listdir(self.ICONS_DIR):
+            stem, ext = os.path.splitext(fname)
+            if stem.lower() == icon_stem.lower() and ext.lower() in (".svg", ".png"):
+                candidates.append((ext.lower(), fname))
+        if not candidates:
+            return None
+        # Try every match in preference order (svg first) — if the "best"
+        # one fails to load (e.g. an .svg file but the QtSvg plugin isn't
+        # available), fall through to the next instead of giving up.
+        candidates.sort(key=lambda c: c[0] != ".svg")
+        for _, fname in candidates:
+            path = os.path.join(self.ICONS_DIR, fname)
+            px = QPixmap(path)
+            if not px.isNull():
+                return px.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return None
+
     def _build_header(self, layout):
         header = QFrame()
         header.setObjectName("pdfToolHeader")
@@ -275,19 +178,33 @@ class PdfToolPanel(QFrame):
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(9)
 
-        badge = QLabel(self.TOOL_GLYPHS.get(self.tool_id, "PDF"))
+        icon_px = self._tool_icon_pixmap(self.tool_id)
+        badge = QLabel()
         badge.setAlignment(Qt.AlignCenter)
-        badge.setFixedSize(34, 28)
-        badge.setStyleSheet("""
-            QLabel {
-                background: rgba(88,101,242,0.18);
-                border: 1px solid rgba(88,101,242,0.34);
-                border-radius: 9px;
-                color: #dfe3ff;
-                font-size: 10px;
-                font-weight: 800;
-            }
-        """)
+        if icon_px is not None:
+            badge.setPixmap(icon_px)
+            badge.setFixedSize(28, 28)
+            badge.setStyleSheet("""
+                QLabel {
+                    background: rgba(88,101,242,0.18);
+                    border: 1px solid rgba(88,101,242,0.34);
+                    border-radius: 9px;
+                }
+            """)
+        else:
+            badge.setText(self.TOOL_GLYPHS.get(self.tool_id, "PDF"))
+            badge.setFixedHeight(28)
+            badge.setStyleSheet("""
+                QLabel {
+                    background: rgba(88,101,242,0.18);
+                    border: 1px solid rgba(88,101,242,0.34);
+                    border-radius: 9px;
+                    color: #dfe3ff;
+                    font-size: 10px;
+                    font-weight: 800;
+                    padding: 0px 11px;
+                }
+            """)
         title = QLabel(self.TOOL_TITLES.get(self.tool_id, "PDF Tool"))
         title.setStyleSheet(PDF_HEADER_STYLE)
         chevron = QLabel("⌄")
@@ -302,10 +219,7 @@ class PdfToolPanel(QFrame):
     def _build_controls(self, layout, tool_id):
         builders = {
             "img2pdf": self._sb_img2pdf,
-            "pdf2img": self._sb_pdf2img,
             "merge": self._sb_merge,
-            "split": self._sb_split,
-            "compress": self._sb_compress,
             "organize": self._sb_organize,
             "protect": self._sb_protect,
         }
@@ -331,6 +245,31 @@ class PdfToolPanel(QFrame):
         btn.setCursor(QCursor(Qt.PointingHandCursor))
         return btn
 
+    # ------------------------------------------------------------------
+    # DIRECT-SAVE OUTPUT PATH
+    # ------------------------------------------------------------------
+    # Mirrors the folder/naming/collision convention main_window.py uses
+    # for its other direct-save tools (_do_crop_save, _bgremove_save):
+    # a fixed "<mode>_output" folder next to the app, auto-created, with
+    # a "_N" numeric suffix if the target filename already exists.
+    # "pdf_output" matches the folder open_output_folder() already opens
+    # for MODE_PDF, so the 📂 button keeps working with no changes there.
+    PDF_OUTPUT_FOLDER = "pdf_output"
+
+    def _output_path(self, filename):
+        folder = os.path.abspath(self.PDF_OUTPUT_FOLDER)
+        os.makedirs(folder, exist_ok=True)
+        out = os.path.join(folder, filename)
+        if not os.path.exists(out):
+            return out
+        name, ext = os.path.splitext(filename)
+        c = 1
+        while True:
+            candidate = os.path.join(folder, f"{name}_{c}{ext}")
+            if not os.path.exists(candidate):
+                return candidate
+            c += 1
+
     def _add_common_buttons(self, layout, browse_text, browse_slot, clear=True):
         browse_btn = self._secondary_btn(browse_text, 34)
         browse_btn.clicked.connect(browse_slot)
@@ -346,6 +285,12 @@ class PdfToolPanel(QFrame):
     # ------------------------------------------------------------------
     def _sb_img2pdf(self, layout):
         self._add_common_buttons(layout, "Browse Images", self._add_images)
+        layout.addWidget(section_label("Page Size"))
+        self._page_size_combo = QComboBox()
+        self._page_size_combo.addItems(["Fit to Image", "A4", "US Letter"])
+        self._page_size_combo.setFixedHeight(34)
+        self._page_size_combo.setStyleSheet(COMBO_STYLE)
+        layout.addWidget(self._page_size_combo)
         go_btn = self._action_btn("Convert to PDF")
         go_btn.clicked.connect(self._run_img2pdf)
         layout.addWidget(go_btn)
@@ -362,78 +307,40 @@ class PdfToolPanel(QFrame):
         if not files:
             self._set_status("Add at least one image first.", err=True)
             return
-        out, _ = QFileDialog.getSaveFileName(self, "Save PDF as", "output.pdf", "PDF (*.pdf)")
-        if not out:
-            return
-        self._run_worker(self._do_img2pdf, files, out)
+        base = os.path.splitext(os.path.basename(files[0]))[0]
+        out = self._output_path(f"{base}_converted.pdf")
+        page_size = self._page_size_combo.currentText() if self._page_size_combo else "Fit to Image"
+        self._run_worker(self._do_img2pdf, files, out, page_size)
 
     @staticmethod
-    def _do_img2pdf(files, out):
-        imgs = []
-        first = Image.open(files[0]).convert("RGB")
-        for f in files[1:]:
-            imgs.append(Image.open(f).convert("RGB"))
-        first.save(out, save_all=True, append_images=imgs)
-        return f"Saved -> {os.path.basename(out)}"
+    def _do_img2pdf(files, out, page_size="Fit to Image"):
+        # Standard page sizes at 200 DPI (good balance of quality vs file size).
+        PAGE_SIZES_PX = {
+            "A4": (1654, 2339),
+            "US Letter": (1700, 2200),
+        }
 
-    # ------------------------------------------------------------------
-    # PDF -> IMG
-    # ------------------------------------------------------------------
-    def _sb_pdf2img(self, layout):
-        self._add_common_buttons(layout, "Browse PDF", self._add_pdf_single, clear=False)
-        layout.addWidget(section_label("DPI"))
-        self._dpi_spin = QSpinBox()
-        self._dpi_spin.setRange(72, 600)
-        self._dpi_spin.setValue(150)
-        self._dpi_spin.setButtonSymbols(QSpinBox.NoButtons)
-        self._dpi_spin.setFixedHeight(34)
-        self._dpi_spin.setStyleSheet(SPINBOX_STYLE)
-        layout.addWidget(self._dpi_spin)
-        layout.addStretch(1)
-        go_btn = self._action_btn("Export Images")
-        go_btn.clicked.connect(self._run_pdf2img)
-        layout.addWidget(go_btn)
-        self._go_btn = go_btn
+        source_imgs = [Image.open(f).convert("RGB") for f in files]
 
-    def _add_pdf_single(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF (*.pdf)")
-        if file_path:
-            self.canvas.clear()
-            self.canvas.add_files([file_path])
+        if page_size in PAGE_SIZES_PX:
+            target_w, target_h = PAGE_SIZES_PX[page_size]
+            pages = []
+            for img in source_imgs:
+                page = Image.new("RGB", (target_w, target_h), "white")
+                # Scale the image down to fit within the page while
+                # preserving aspect ratio, then center it.
+                scale = min(target_w / img.width, target_h / img.height)
+                new_w, new_h = max(1, int(img.width * scale)), max(1, int(img.height * scale))
+                resized = img.resize((new_w, new_h), Image.LANCZOS)
+                page.paste(resized, ((target_w - new_w) // 2, (target_h - new_h) // 2))
+                pages.append(page)
+        else:
+            # "Fit to Image": each page is exactly the size of its source image.
+            pages = source_imgs
 
-    def _run_pdf2img(self):
-        files = self.canvas.get_files()
-        if not files:
-            self._set_status("Drop a PDF first.", err=True)
-            return
-        folder = QFileDialog.getExistingDirectory(self, "Output folder")
-        if not folder:
-            return
-        self._run_worker(self._do_pdf2img, files[0], folder, self._dpi_spin.value())
-
-    @staticmethod
-    def _do_pdf2img(pdf_path, folder, dpi):
-        try:
-            from pdf2image import convert_from_path
-            pages = convert_from_path(pdf_path, dpi=dpi)
-        except Exception:
-            try:
-                import fitz
-                doc = fitz.open(pdf_path)
-                pages = []
-                for page in doc:
-                    mat = fitz.Matrix(dpi / 72, dpi / 72)
-                    pix = page.get_pixmap(matrix=mat)
-                    import io
-                    pages.append(Image.open(io.BytesIO(pix.tobytes("png"))))
-            except Exception as e2:
-                raise RuntimeError(
-                    f"pdf2image (needs Poppler) or PyMuPDF not available.\n"
-                    f"Install: pip install pdf2image or pip install pymupdf\n{e2}")
-        name = os.path.splitext(os.path.basename(pdf_path))[0]
-        for i, page in enumerate(pages):
-            page.save(os.path.join(folder, f"{name}_page{i+1}.jpg"), "JPEG")
-        return f"{len(pages)} page(s) saved"
+        first, rest = pages[0], pages[1:]
+        first.save(out, save_all=True, append_images=rest)
+        return f"Saved {len(pages)} page(s) -> {os.path.basename(out)}"
 
     # ------------------------------------------------------------------
     # MERGE
@@ -455,9 +362,7 @@ class PdfToolPanel(QFrame):
         if len(files) < 2:
             self._set_status("Add at least two PDFs.", err=True)
             return
-        out, _ = QFileDialog.getSaveFileName(self, "Save merged PDF", "merged.pdf", "PDF (*.pdf)")
-        if not out:
-            return
+        out = self._output_path("merged.pdf")
         self._run_worker(self._do_merge, files, out)
 
     @staticmethod
@@ -481,145 +386,33 @@ class PdfToolPanel(QFrame):
         return f"Merged {len(files)} files -> {os.path.basename(out)}"
 
     # ------------------------------------------------------------------
-    # SPLIT
-    # ------------------------------------------------------------------
-    def _sb_split(self, layout):
-        self._add_common_buttons(layout, "Browse PDF", self._add_pdf_single, clear=False)
-        clear_btn = self._secondary_btn("Clear", 34)
-        clear_btn.clicked.connect(self.canvas.clear)
-        layout.addWidget(clear_btn)
-        layout.addStretch(1)
-        go_btn = self._action_btn("Split PDF")
-        go_btn.clicked.connect(self._run_split)
-        layout.addWidget(go_btn)
-        self._go_btn = go_btn
-
-    def _run_split(self):
-        files = self.canvas.get_files()
-        if not files:
-            self._set_status("Drop a PDF first.", err=True)
-            return
-        folder = QFileDialog.getExistingDirectory(self, "Output folder for split pages")
-        if not folder:
-            return
-        self._run_worker(self._do_split, files[0], folder)
-
-    @staticmethod
-    def _do_split(pdf_path, folder):
-        try:
-            from PyPDF2 import PdfReader, PdfWriter
-            reader = PdfReader(pdf_path)
-            n = len(reader.pages)
-            name = os.path.splitext(os.path.basename(pdf_path))[0]
-            for i, page in enumerate(reader.pages):
-                writer = PdfWriter()
-                writer.add_page(page)
-                out = os.path.join(folder, f"{name}_page{i+1}.pdf")
-                with open(out, "wb") as fh:
-                    writer.write(fh)
-        except ImportError:
-            import pypdf
-            reader = pypdf.PdfReader(pdf_path)
-            n = len(reader.pages)
-            name = os.path.splitext(os.path.basename(pdf_path))[0]
-            for i, page in enumerate(reader.pages):
-                writer = pypdf.PdfWriter()
-                writer.add_page(page)
-                out = os.path.join(folder, f"{name}_page{i+1}.pdf")
-                with open(out, "wb") as fh:
-                    writer.write(fh)
-        return f"Split into {n} page(s)"
-
-    # ------------------------------------------------------------------
-    # COMPRESS PDF
-    # ------------------------------------------------------------------
-    def _sb_compress(self, layout):
-        self._add_common_buttons(layout, "Browse PDF", self._add_pdf_single, clear=False)
-        clear_btn = self._secondary_btn("Clear", 34)
-        clear_btn.clicked.connect(self.canvas.clear)
-        layout.addWidget(clear_btn)
-        layout.addStretch(1)
-        go_btn = self._action_btn("Compress PDF")
-        go_btn.clicked.connect(self._run_compress)
-        layout.addWidget(go_btn)
-        self._go_btn = go_btn
-
-    def _run_compress(self):
-        files = self.canvas.get_files()
-        if not files:
-            self._set_status("Drop a PDF first.", err=True)
-            return
-        out, _ = QFileDialog.getSaveFileName(self, "Save compressed PDF", "compressed.pdf", "PDF (*.pdf)")
-        if not out:
-            return
-        self._run_worker(self._do_compress, files[0], out)
-
-    @staticmethod
-    def _do_compress(pdf_path, out):
-        orig_kb = os.path.getsize(pdf_path) / 1024
-        try:
-            from PyPDF2 import PdfReader, PdfWriter
-            reader = PdfReader(pdf_path)
-            writer = PdfWriter()
-            for page in reader.pages:
-                page.compress_content_streams()
-                writer.add_page(page)
-            with open(out, "wb") as fh:
-                writer.write(fh)
-        except ImportError:
-            import pypdf
-            reader = pypdf.PdfReader(pdf_path)
-            writer = pypdf.PdfWriter()
-            for page in reader.pages:
-                page.compress_content_streams()
-                writer.add_page(page)
-            with open(out, "wb") as fh:
-                writer.write(fh)
-        new_kb = os.path.getsize(out) / 1024
-        pct = int((1 - new_kb / orig_kb) * 100) if orig_kb > 0 else 0
-        return f"{orig_kb:.0f} KB -> {new_kb:.0f} KB ({pct}% smaller)"
-
-    # ------------------------------------------------------------------
     # ORGANIZE PDF
     # ------------------------------------------------------------------
     def _sb_organize(self, layout):
         self._add_common_buttons(layout, "Browse PDFs", self._add_pdfs_multi)
         expand_btn = self._secondary_btn("Expand", 34)
-        expand_btn.clicked.connect(self._open_expanded_organizer)
+        expand_btn.clicked.connect(self._toggle_organize_expanded)
         layout.addWidget(expand_btn)
+        self._expand_btn = expand_btn
+        self._organize_expanded = False
         go_btn = self._action_btn("Save PDF")
         go_btn.clicked.connect(self._run_organize)
         layout.addWidget(go_btn)
         self._go_btn = go_btn
 
-    def _open_expanded_organizer(self):
-        if self.tool_id != "organize":
-            return
-        self._layout.removeWidget(self.canvas)
-        self.canvas.setParent(None)
-        if hasattr(self.canvas, "set_expanded_workspace"):
-            self.canvas.set_expanded_workspace(True)
-        dialog = ExpandedWorkspaceDialog(
-            "Organize PDF",
-            self.canvas,
-            [
-                ("Browse PDFs", self._add_pdfs_multi, False),
-                ("Clear", self.canvas.clear, False),
-                ("Save PDF", self._run_organize, True),
-            ],
-            self.window()
-        )
-        dialog.finished.connect(lambda _code: self._restore_compact_canvas())
-        dialog.exec_()
+    def _toggle_organize_expanded(self):
+        """Grow/shrink the Organize canvas in place — no separate window.
 
-    def _restore_compact_canvas(self):
-        if self.canvas.parent() is self:
+        set_expanded_workspace() already resizes the page grid's cards and
+        emits height_hint_changed, which _sync_panel_height() below is
+        wired to, which in turn tells main_window to grow/shrink the whole
+        app window around it. No reparenting needed.
+        """
+        if self.tool_id != "organize" or not hasattr(self.canvas, "set_expanded_workspace"):
             return
-        if hasattr(self.canvas, "set_expanded_workspace"):
-            self.canvas.set_expanded_workspace(False)
-        self.canvas.setParent(self)
-        self._layout.insertWidget(self._canvas_index, self.canvas)
-        self.canvas.show()
+        self._organize_expanded = not self._organize_expanded
+        self.canvas.set_expanded_workspace(self._organize_expanded)
+        self._expand_btn.setText("Collapse" if self._organize_expanded else "Expand")
         self._sync_panel_height()
 
     def _run_organize(self):
@@ -627,9 +420,7 @@ class PdfToolPanel(QFrame):
         if not pages:
             self._set_status("Add PDF pages first.", err=True)
             return
-        out, _ = QFileDialog.getSaveFileName(self, "Save organized PDF", "organized.pdf", "PDF (*.pdf)")
-        if not out:
-            return
+        out = self._output_path("organized.pdf")
         self._run_worker(self._do_organize, pages, out)
 
     # ------------------------------------------------------------------
@@ -761,7 +552,6 @@ class PdfToolPanel(QFrame):
         self._pw_input.setPlaceholderText("Enter password…")
         self._pw_input.setFixedHeight(32)
         self._pw_input.setStyleSheet(_PW_STYLE)
-        self._pw_input.textChanged.connect(self._update_pw_strength)
         layout.addWidget(self._pw_input)
 
         # ---- Confirm field ----
@@ -773,13 +563,7 @@ class PdfToolPanel(QFrame):
         self._pw_confirm.setPlaceholderText("Repeat password…")
         self._pw_confirm.setFixedHeight(32)
         self._pw_confirm.setStyleSheet(_PW_STYLE)
-        self._pw_confirm.textChanged.connect(self._update_pw_strength)
         layout.addWidget(self._pw_confirm)
-
-        # ---- Strength bar ----
-        self._pw_strength = _PasswordStrengthBar()
-        self._pw_strength.setFixedHeight(12)
-        layout.addWidget(self._pw_strength)
 
         # ---- Overwrite checkbox ----
         self._overwrite_chk = QCheckBox("Overwrite original PDF")
@@ -906,16 +690,6 @@ class PdfToolPanel(QFrame):
         """No-op: protect tool uses _build_protect_layout() via __init__ branch."""
         pass
 
-    def _update_pw_strength(self):
-        """Update the strength bar whenever either password field changes."""
-        if self._pw_strength is None:
-            return
-        pw = self._pw_input.text() if self._pw_input else ""
-        confirm = self._pw_confirm.text() if self._pw_confirm else ""
-        score = _password_strength(pw)
-        match = (pw == confirm) if (pw and confirm) else None
-        self._pw_strength.set_state(score, match)
-
     def _run_protect(self):
         """Validate inputs then dispatch the protect worker."""
         if not self._protect_path:
@@ -936,13 +710,9 @@ class PdfToolPanel(QFrame):
             # Overwrite: write to a temp file first, then atomically replace.
             out = self._protect_path
         else:
-            # Save to a new file chosen by the user.
+            # Save to a new file in the pdf_output folder.
             base = os.path.splitext(os.path.basename(self._protect_path))[0]
-            default_name = f"{base}_protected.pdf"
-            out, _ = QFileDialog.getSaveFileName(
-                self, "Save protected PDF", default_name, "PDF (*.pdf)")
-            if not out:
-                return
+            out = self._output_path(f"{base}_protected.pdf")
 
         self._run_worker(self._do_protect, self._protect_path, out, pw, overwrite)
 
@@ -1084,7 +854,11 @@ class PdfToolPanel(QFrame):
     def _on_files_changed(self, files):
         self._sync_action_state(files)
         if files:
-            self._set_status(f"{len(files)} file(s) ready.", err=False)
+            if self.tool_id == "img2pdf":
+                noun = "image" if len(files) == 1 else "images"
+                self._set_status(f"{len(files)} {noun} ready — will create a {len(files)}-page PDF.", err=False)
+            else:
+                self._set_status(f"{len(files)} file(s) ready.", err=False)
         else:
             self._set_status("", err=False)
 
@@ -1108,9 +882,27 @@ class PdfToolPanel(QFrame):
         self.setFixedHeight(self.sizeHint().height())
         self.height_hint_changed.emit(self.height())
 
+    def _worker_is_running(self):
+        """Safe isRunning() — returns False if the C++ QThread has been deleted."""
+        try:
+            return self._thread is not None and self._thread.isRunning()
+        except RuntimeError:
+            self._thread = None
+            self._worker = None
+            return False
+
     def _run_worker(self, fn, *args):
+        # Guard against re-entrant runs. self._go_btn.setEnabled(False)
+        # below only protects the compact panel's own button — the
+        # Organize "Expand" dialog builds its own separate Save/Browse
+        # buttons that aren't disabled by that, so without this check a
+        # user could click Save PDF again mid-run and kick off a second
+        # concurrent worker/thread writing to disk at the same time.
+        if self._worker_is_running():
+            return
         self._set_status("Working...", err=False)
-        self._go_btn.setEnabled(False)
+        if self._go_btn:
+            self._go_btn.setEnabled(False)
         self._thread = QThread()
         self._worker = PdfWorker(fn, *args)
         self._worker.moveToThread(self._thread)
@@ -1124,12 +916,6 @@ class PdfToolPanel(QFrame):
 
     def _on_done(self, msg):
         self._set_status(msg, err=False)
-        if self.tool_id == "organize" and getattr(self, "canvas", None) is not None:
-            # The organized PDF has been written to disk — the loaded
-            # pages/thumbnails aren't needed anymore, so release them
-            # rather than holding every page's thumbnail in memory for
-            # the rest of the session.
-            self.canvas.clear()
         self._sync_action_state()
 
     def _on_err(self, err):

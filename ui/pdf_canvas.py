@@ -27,17 +27,17 @@ class PdfDropCanvas(QWidget):
     files_changed = pyqtSignal(list)
     height_hint_changed = pyqtSignal(int)
 
+    MAX_VISIBLE_ROWS = 2  # grow the canvas row-by-row up to this many rows, then scroll
+
     def __init__(self, accept_images=False, accept_pdfs=True, parent=None):
         super().__init__(parent)
         self._accept_images = accept_images
         self._accept_pdfs = accept_pdfs
         self._files = []
         self._previews = []
-        self._remove_hit_rects = []
         self._hovering = False
         self._drag_progress = 0.0
         self._drop_pulse = 0.0
-        self._expanded_workspace = False
 
         self._drag_anim = QPropertyAnimation(self, b"dragProgress", self)
         self._drag_anim.setDuration(170)
@@ -52,6 +52,51 @@ class PdfDropCanvas(QWidget):
         self.setCursor(Qt.ArrowCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+
+        self._drop_strip = _DropStrip("Release to add files", "Drop more files here")
+        self._drop_strip.hide()
+        layout.addWidget(self._drop_strip)
+
+        self._grid = _FileCardGrid()
+        self._grid.remove_requested.connect(self.remove_file)
+        self._grid.move_requested.connect(self.move_file)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setFrameShape(QScrollArea.NoFrame)
+        self._scroll.setFixedHeight(self._viewport_height_for(1))
+        self._scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical {
+                background: rgba(255,255,255,0.04);
+                width: 8px;
+                border-radius: 4px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255,255,255,0.18);
+                border-radius: 4px;
+                min-height: 32px;
+            }
+            QScrollBar::handle:vertical:hover { background: rgba(165,180,252,0.42); }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        """)
+        self._scroll.setWidget(self._grid)
+        vp = self._scroll.viewport()
+        vp.setAutoFillBackground(True)
+        pal = vp.palette()
+        pal.setColor(QPalette.Window, QColor(30, 30, 34))
+        vp.setPalette(pal)
+        self._scroll.hide()
+        layout.addWidget(self._scroll)
+
         self.setFixedHeight(self.preferred_height())
 
     @pyqtProperty(float)
@@ -61,6 +106,7 @@ class PdfDropCanvas(QWidget):
     @dragProgress.setter
     def dragProgress(self, value):
         self._drag_progress = max(0.0, min(1.0, value))
+        self._drop_strip.set_progress(self._drag_progress, self._drop_pulse)
         self.update()
 
     @pyqtProperty(float)
@@ -70,10 +116,30 @@ class PdfDropCanvas(QWidget):
     @dropPulse.setter
     def dropPulse(self, value):
         self._drop_pulse = max(0.0, min(1.0, value))
+        self._drop_strip.set_progress(self._drag_progress, self._drop_pulse)
         self.update()
 
+    def _viewport_height_for(self, row_count):
+        g = self._grid
+        rows = max(1, row_count)
+        return g.MARGIN * 2 + rows * g.CARD_H + max(0, rows - 1) * g.GAP
+
+    def _rows_needed(self):
+        """How many rows the current file count actually fills, based on
+        however many cards fit per row right now (e.g. 4/row once the
+        panel is wide enough). Used so the canvas grows one row at a time
+        instead of always reserving space for MAX_VISIBLE_ROWS."""
+        if not self._files:
+            return 0
+        cols = self._grid.cols()
+        return -(-len(self._files) // cols)  # ceil division
+
     def preferred_height(self):
-        return 216 if self._files else 156
+        if not self._files:
+            return 156
+        rows = min(self.MAX_VISIBLE_ROWS, self._rows_needed())
+        viewport_h = self._viewport_height_for(rows)
+        return 20 + self._drop_strip.height() + 10 + viewport_h
 
     def get_files(self):
         return list(self._files)
@@ -81,7 +147,7 @@ class PdfDropCanvas(QWidget):
     def clear(self):
         self._files = []
         self._previews = []
-        self._remove_hit_rects = []
+        self._sync_visibility()
         self._sync_height()
         self.files_changed.emit([])
         self.update()
@@ -91,9 +157,27 @@ class PdfDropCanvas(QWidget):
             self._files.pop(index)
             if index < len(self._previews):
                 self._previews.pop(index)
+            self._sync_visibility()
             self._sync_height()
             self.files_changed.emit(list(self._files))
             self.update()
+
+    def move_file(self, index, delta):
+        """Swap the file at `index` with its neighbour `delta` steps away
+        (delta = -1 moves it earlier, +1 moves it later).
+
+        Order matters for both Img->PDF (page order) and Merge (page order
+        in the combined file), so this is shared here rather than only on
+        the Organize canvas.
+        """
+        target = index + delta
+        if not (0 <= index < len(self._files)) or not (0 <= target < len(self._files)):
+            return
+        self._files[index], self._files[target] = self._files[target], self._files[index]
+        if index < len(self._previews) and target < len(self._previews):
+            self._previews[index], self._previews[target] = self._previews[target], self._previews[index]
+        self._grid.set_files(self._files, self._previews)
+        self.files_changed.emit(list(self._files))
 
     def add_files(self, paths):
         added = False
@@ -107,11 +191,23 @@ class PdfDropCanvas(QWidget):
             added = True
         if added:
             self._play_drop_pulse()
+            self._sync_visibility()
             self._sync_height()
             self.files_changed.emit(list(self._files))
             self.update()
 
+    def _sync_visibility(self):
+        has_files = bool(self._files)
+        self._drop_strip.setVisible(has_files)
+        self._scroll.setVisible(has_files)
+        if has_files:
+            self._grid.set_files(self._files, self._previews)
+
     def _sync_height(self):
+        rows = min(self.MAX_VISIBLE_ROWS, self._rows_needed()) if self._files else 1
+        viewport_h = self._viewport_height_for(rows)
+        if self._scroll.height() != viewport_h:
+            self._scroll.setFixedHeight(viewport_h)
         h = self.preferred_height()
         if self.height() != h:
             self.setFixedHeight(h)
@@ -179,31 +275,13 @@ class PdfDropCanvas(QWidget):
         self.add_files(paths)
         event.acceptProposedAction()
 
-    def mouseMoveEvent(self, event):
-        self.setCursor(
-            Qt.PointingHandCursor if any(rect.contains(event.pos()) for rect in self._remove_hit_rects)
-            else Qt.ArrowCursor
-        )
-
-    def mouseReleaseEvent(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        for index, rect in enumerate(self._remove_hit_rects):
-            if rect.contains(event.pos()):
-                self.remove_file(index)
-                return
-
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.fillRect(self.rect(), QColor(30, 30, 34))
-        self._remove_hit_rects = []
         if not self._files:
             self._draw_empty_state(painter)
-            return
-        self._draw_drop_strip(painter)
-        self._draw_file_cards(painter)
 
     def _draw_empty_state(self, painter):
         rect = self.rect().adjusted(12, 10, -12, -10)
@@ -224,7 +302,7 @@ class PdfDropCanvas(QWidget):
         painter.drawRoundedRect(rect, 15, 15)
 
         center = rect.center()
-        icon_rect = QRect(center.x() - 23, rect.top() + 25 - int(4 * glow), 46, 46)
+        icon_rect = QRect(center.x() - 23, rect.top() + 26 - int(4 * glow), 46, 46)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(88, 101, 242, int(40 + 44 * glow)))
         painter.drawRoundedRect(icon_rect, 12, 12)
@@ -235,7 +313,12 @@ class PdfDropCanvas(QWidget):
         painter.setFont(icon_font)
         painter.setPen(QColor(228, 231, 255, 232))
         icon_text = "IMG" if self._accept_images and not self._accept_pdfs else "PDF"
-        painter.drawText(icon_rect, Qt.AlignCenter, icon_text)
+        # A couple of px nudge to the right: mathematically centered text
+        # reads as left-shifted here because "G"/"F" taper toward their
+        # right edge while "I"/"P" are flush strokes, so the optical
+        # centre sits right of the geometric centre.
+        icon_text_rect = icon_rect.adjusted(2, 0, 2, 0)
+        painter.drawText(icon_text_rect, Qt.AlignCenter | Qt.TextDontClip, icon_text)
 
         title_font = QFont(self.font())
         title_font.setPointSize(12)
@@ -243,19 +326,35 @@ class PdfDropCanvas(QWidget):
         painter.setFont(title_font)
         painter.setPen(QColor(255, 255, 255, 220))
         target = "images" if self._accept_images and not self._accept_pdfs else "PDF files"
-        painter.drawText(QRect(rect.left(), icon_rect.bottom() + 10, rect.width(), 22), Qt.AlignCenter, f"Drop {target} here")
+        title_rect = QRect(rect.left(), icon_rect.bottom() + 16, rect.width(), 30)
+        painter.drawText(title_rect, Qt.AlignCenter | Qt.TextDontClip, f"Drop {target} here")
 
-        body_font = QFont(self.font())
-        body_font.setPointSize(9)
-        painter.setFont(body_font)
-        painter.setPen(QColor(255, 255, 255, 104))
-        painter.drawText(QRect(rect.left(), icon_rect.bottom() + 34, rect.width(), 18), Qt.AlignCenter, "or Browse")
 
-    def _draw_drop_strip(self, painter):
-        rect = QRect(12, 10, self.width() - 24, 38)
+class _DropStrip(QWidget):
+    """Small 'drop more files here' invitation strip shown above the file
+    card grid once at least one file is loaded."""
+
+    def __init__(self, active_text, idle_text, parent=None):
+        super().__init__(parent)
+        self._active_text = active_text
+        self._idle_text = idle_text
+        self._drag_progress = 0.0
+        self._drop_pulse = 0.0
+        self.setFixedHeight(38)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_progress(self, drag_progress, drop_pulse):
+        self._drag_progress = drag_progress
+        self._drop_pulse = drop_pulse
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect()
         glow = self._drag_progress
         painter.setPen(QPen(QColor(116, 130, 255, int(60 + 120 * glow)), 1.1 + glow))
-        painter.setBrush(QColor(255, 255, 255, int(8 + 15 * glow)))
+        painter.setBrush(QColor(255, 255, 255, int(8 + 15 * glow + 12 * self._drop_pulse)))
         painter.drawRoundedRect(rect, 12, 12)
 
         font = QFont(self.font())
@@ -263,42 +362,127 @@ class PdfDropCanvas(QWidget):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(255, 255, 255, 160))
-        painter.drawText(rect, Qt.AlignCenter, "Release to add files" if glow else "Drop more files here")
+        painter.drawText(rect, Qt.AlignCenter, self._active_text if glow else self._idle_text)
 
-    def _draw_file_cards(self, painter):
-        files = self._files[:4]
-        count = len(files)
-        gap = 9
-        card_w = min(172, max(132, (self.width() - 24 - gap * (count - 1)) // max(1, count)))
-        card_h = 116
-        total_w = count * card_w + max(0, count - 1) * gap
-        start_x = (self.width() - total_w) // 2
-        y = 62
-        for index, path in enumerate(files):
-            self._draw_card(painter, index, path, QRect(start_x + index * (card_w + gap), y, card_w, card_h))
 
-        remaining = len(self._files) - len(files)
-        if remaining > 0:
-            font = QFont(self.font())
-            font.setPointSize(9)
-            painter.setFont(font)
-            painter.setPen(QColor(255, 255, 255, 82))
-            painter.drawText(QRect(0, y + card_h + 8, self.width(), 20), Qt.AlignCenter, f"+{remaining} more queued")
+class _FileCardGrid(QWidget):
+    """Lays out every loaded file as a card, wrapping into additional rows
+    as needed. Lives inside a QScrollArea so any number of files beyond
+    what fits in the visible viewport height is reachable by scrolling."""
 
-    def _draw_card(self, painter, index, path, rect):
+    remove_requested = pyqtSignal(int)
+    move_requested = pyqtSignal(int, int)
+
+    CARD_W = 176
+    CARD_H = 128
+    GAP = 12
+    MARGIN = 10
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._files = []
+        self._previews = []
+        self._remove_hit_rects = []
+        self._move_left_hit_rects = []
+        self._move_right_hit_rects = []
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+    def set_files(self, files, previews):
+        self._files = files
+        self._previews = previews
+        self._update_geometry()
+        self.update()
+
+    def _cols(self):
+        usable = max(1, self.width() - self.MARGIN * 2)
+        return max(1, (usable + self.GAP) // (self.CARD_W + self.GAP))
+
+    def cols(self):
+        """Public accessor so the parent canvas can size itself to match
+        however many cards actually fit per row at the current width."""
+        return self._cols()
+
+    def _grid_height(self):
+        if not self._files:
+            return self.MARGIN * 2 + self.CARD_H
+        cols = self._cols()
+        rows = (len(self._files) + cols - 1) // cols
+        return self.MARGIN * 2 + rows * self.CARD_H + max(0, rows - 1) * self.GAP
+
+    def _update_geometry(self):
+        self.setMinimumHeight(self._grid_height())
+        self.updateGeometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_geometry()
+
+    def sizeHint(self):
+        return QSize(420, self._grid_height())
+
+    def _card_rect(self, index):
+        cols = self._cols()
+        row = index // cols
+        col = index % cols
+        total_w = cols * self.CARD_W + max(0, cols - 1) * self.GAP
+        start_x = max(self.MARGIN, (self.width() - total_w) // 2)
+        return QRect(
+            start_x + col * (self.CARD_W + self.GAP),
+            self.MARGIN + row * (self.CARD_H + self.GAP),
+            self.CARD_W,
+            self.CARD_H
+        )
+
+    def mouseMoveEvent(self, event):
+        hit = (
+            any(rect.contains(event.pos()) for rect in self._remove_hit_rects)
+            or any(rect.contains(event.pos()) for rect in self._move_left_hit_rects)
+            or any(rect.contains(event.pos()) for rect in self._move_right_hit_rects)
+        )
+        self.setCursor(Qt.PointingHandCursor if hit else Qt.ArrowCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        for index, rect in enumerate(self._move_left_hit_rects):
+            if rect.contains(event.pos()):
+                self.move_requested.emit(index, -1)
+                return
+        for index, rect in enumerate(self._move_right_hit_rects):
+            if rect.contains(event.pos()):
+                self.move_requested.emit(index, 1)
+                return
+        for index, rect in enumerate(self._remove_hit_rects):
+            if rect.contains(event.pos()):
+                self.remove_requested.emit(index)
+                return
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.fillRect(self.rect(), QColor(30, 30, 34))
+        self._remove_hit_rects = []
+        self._move_left_hit_rects = []
+        self._move_right_hit_rects = []
+        for index, path in enumerate(self._files):
+            self._draw_card(painter, index, path, self._card_rect(index), len(self._files))
+
+    def _draw_card(self, painter, index, path, rect, visible_count):
         painter.setPen(QPen(QColor(255, 255, 255, 28), 1))
         painter.setBrush(QColor(255, 255, 255, 12))
-        painter.drawRoundedRect(rect, 11, 11)
+        painter.drawRoundedRect(rect, 12, 12)
 
-        remove_rect = QRect(rect.right() - 28, rect.top() + 8, 20, 20)
+        remove_rect = QRect(rect.right() - 32, rect.top() + 10, 20, 20)
         self._remove_hit_rects.append(remove_rect)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(255, 255, 255, 19))
         painter.drawEllipse(remove_rect)
         painter.setPen(QColor(255, 255, 255, 135))
-        painter.drawText(remove_rect, Qt.AlignCenter, "x")
+        painter.drawText(remove_rect, Qt.AlignCenter | Qt.TextDontClip, "x")
 
-        thumb = QRect(rect.left() + 12, rect.top() + 16, 40, 46)
+        thumb = QRect(rect.left() + 14, rect.top() + 18, 40, 46)
         preview = self._previews[index] if index < len(self._previews) else None
         if preview and not preview.isNull():
             painter.setPen(Qt.NoPen)
@@ -315,37 +499,64 @@ class PdfDropCanvas(QWidget):
             doc_font.setPointSize(9)
             doc_font.setBold(True)
             painter.setFont(doc_font)
-            painter.drawText(thumb, Qt.AlignCenter, (os.path.splitext(path)[1].replace(".", "").upper()[:3] or "PDF"))
+            painter.drawText(thumb, Qt.AlignCenter | Qt.TextDontClip, (os.path.splitext(path)[1].replace(".", "").upper()[:3] or "PDF"))
+
+        text_left = thumb.right() + 14
+        text_w = rect.right() - 16 - text_left
 
         name_font = QFont(self.font())
         name_font.setPointSize(9)
         name_font.setBold(True)
         painter.setFont(name_font)
         painter.setPen(QColor(255, 255, 255, 190))
-        name_rect = QRect(rect.left() + 60, rect.top() + 19, rect.width() - 92, 38)
-        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignTop, _elide(os.path.basename(path), name_font, name_rect.width()))
+        name_rect = QRect(text_left, rect.top() + 20, text_w, 22)
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextDontClip,
+                          _elide(os.path.basename(path), name_font, name_rect.width()))
 
         size_font = QFont(self.font())
         size_font.setPointSize(8)
         painter.setFont(size_font)
         painter.setPen(QColor(255, 255, 255, 96))
-        painter.drawText(QRect(rect.left() + 60, rect.top() + 52, rect.width() - 76, 18), Qt.AlignLeft, _file_size(path))
+        size_rect = QRect(text_left, name_rect.bottom() + 6, text_w, 18)
+        painter.drawText(size_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextDontClip, _file_size(path))
 
-        footer = QRectF(rect.left() + 12, rect.bottom() - 32, rect.width() - 24, 20)
+        footer = QRectF(rect.left() + 14, rect.bottom() - 34, rect.width() - 28, 22)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(88, 101, 242, 24))
         painter.drawRoundedRect(footer, 8, 8)
+
+        arrow_w = 24
+        left_arrow = QRect(int(footer.left()), int(footer.top()), arrow_w, int(footer.height()))
+        right_arrow = QRect(int(footer.right()) - arrow_w, int(footer.top()), arrow_w, int(footer.height()))
+        label_rect = QRect(left_arrow.right(), int(footer.top()), right_arrow.left() - left_arrow.right(), int(footer.height()))
+
+        can_move_left = index > 0
+        can_move_right = index < visible_count - 1
+        painter.setPen(QColor(165, 180, 252, 178 if can_move_left else 60))
+        painter.drawText(left_arrow, Qt.AlignCenter | Qt.TextDontClip, "‹")
+        painter.setPen(QColor(165, 180, 252, 178 if can_move_right else 60))
+        painter.drawText(right_arrow, Qt.AlignCenter | Qt.TextDontClip, "›")
+        self._move_left_hit_rects.append(left_arrow if can_move_left else QRect())
+        self._move_right_hit_rects.append(right_arrow if can_move_right else QRect())
+
         painter.setPen(QColor(165, 180, 252, 178))
-        painter.drawText(footer.toRect(), Qt.AlignCenter, f"File {index + 1}")
+        painter.drawText(label_rect, Qt.AlignCenter | Qt.TextDontClip, f"File {index + 1}")
 
 
 class OrganizePageGrid(QWidget):
     pages_changed = pyqtSignal()
+    layout_changed = pyqtSignal()  # card size recalculated -> parent should resync height
 
     CARD_W = 158
     CARD_H = 218
     GAP = 14
     MARGIN = 14
+
+    EXPANDED_COLS = 3
+    EXPANDED_GAP = 18
+    EXPANDED_MARGIN = 18
+    # width/height aspect kept consistent with the normal-mode card shape
+    _ASPECT = CARD_H / CARD_W
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -353,6 +564,7 @@ class OrganizePageGrid(QWidget):
         self.CARD_H = self.__class__.CARD_H
         self.GAP = self.__class__.GAP
         self.MARGIN = self.__class__.MARGIN
+        self._expanded = False
         self._pages = []
         self._hit_rects = []
         self._drag_index = None
@@ -365,11 +577,19 @@ class OrganizePageGrid(QWidget):
         self.setMinimumHeight(220)
 
     def set_expanded(self, expanded):
+        self._expanded = expanded
         if expanded:
-            self.CARD_W = 190
-            self.CARD_H = 258
-            self.GAP = 16
-            self.MARGIN = 16
+            self.GAP = self.EXPANDED_GAP
+            self.MARGIN = self.EXPANDED_MARGIN
+            # Best-effort starting guess; _recalc_expanded_card_size()
+            # (called below and again on the next resizeEvent) corrects
+            # this to whatever the real runtime width allows so 3 columns
+            # always fit exactly, rather than trusting a fixed pixel size
+            # that can silently drop to 2 columns depending on scrollbar
+            # width / platform metrics.
+            self.CARD_W = 220
+            self.CARD_H = int(self.CARD_W * self._ASPECT)
+            self._recalc_expanded_card_size()
         else:
             self.CARD_W = self.__class__.CARD_W
             self.CARD_H = self.__class__.CARD_H
@@ -377,6 +597,23 @@ class OrganizePageGrid(QWidget):
             self.MARGIN = self.__class__.MARGIN
         self._update_geometry()
         self.update()
+
+    def _recalc_expanded_card_size(self):
+        """Recompute CARD_W/CARD_H from the grid's actual current width so
+        EXPANDED_COLS (3) always fit exactly, however much width the
+        scrollbar/layout actually leaves at runtime."""
+        if not self._expanded:
+            return False
+        cols = self.EXPANDED_COLS
+        usable = max(1, self.width() - self.MARGIN * 2)
+        card_w = (usable - self.GAP * (cols - 1)) // cols
+        card_w = max(140, card_w)  # never shrink below a legible size
+        card_h = int(card_w * self._ASPECT)
+        if card_w != self.CARD_W or card_h != self.CARD_H:
+            self.CARD_W = card_w
+            self.CARD_H = card_h
+            return True
+        return False
 
     def set_pages(self, pages):
         self._pages = pages
@@ -387,6 +624,8 @@ class OrganizePageGrid(QWidget):
         self.update()
 
     def _cols(self):
+        if self._expanded:
+            return self.EXPANDED_COLS
         usable = max(1, self.width() - self.MARGIN * 2)
         return max(1, usable // (self.CARD_W + self.GAP))
 
@@ -402,6 +641,11 @@ class OrganizePageGrid(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._expanded and self._recalc_expanded_card_size():
+            # Card size changed because the real width became known/changed
+            # (e.g. first layout pass) — tell the parent canvas to resync
+            # its fixed height against the now-accurate row height.
+            self.layout_changed.emit()
         self._update_geometry()
 
     def sizeHint(self):
@@ -615,7 +859,32 @@ class OrganizePageGrid(QWidget):
         painter.setBrush(QColor(255, 255, 255, 20 if floating else 13))
         painter.drawRoundedRect(rect, 12, 12)
 
-        thumb_h = max(126, rect.height() - 92)
+        # Text metrics for the info block are needed up front so the
+        # thumbnail height can be derived from them (see below) instead of
+        # a hardcoded constant — that's what was causing the rotate/remove
+        # icon row to overlap the filename: the old "- 92" assumed the
+        # "Page N" + filename block was always ~38px tall, which only held
+        # for one specific font size. On platforms/DPIs where the default
+        # UI font renders those two lines taller, the text grew into the
+        # icon row's fixed position at the bottom of the card.
+        page_font = QFont(self.font())
+        page_font.setPointSize(9)
+        page_font.setBold(True)
+        page_line_h = QFontMetrics(page_font).height()
+
+        name_font = QFont(self.font())
+        name_font.setPointSize(8)
+        name_line_h = QFontMetrics(name_font).height()
+
+        top_gap = 4     # gap between thumbnail and the "Page N" row
+        row_gap = 3     # gap between the "Page N" row and the filename row
+        clearance = 6   # guaranteed gap between the filename and the icons
+        action_h = 24   # height of the rotate/remove icon row (_action_rects)
+        bottom_margin = 10  # gap between the icon row and the card's bottom edge
+
+        text_block_h = top_gap + page_line_h + row_gap + name_line_h + clearance
+        reserved_h = 12 + text_block_h + action_h + bottom_margin  # 12 = margin above thumbnail
+        thumb_h = max(90, rect.height() - reserved_h)
         thumb_rect = QRect(rect.left() + 12, rect.top() + 12, rect.width() - 24, thumb_h)
         gradient = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomRight())
         gradient.setColorAt(0, QColor(255, 255, 255, 34))
@@ -647,19 +916,25 @@ class OrganizePageGrid(QWidget):
             painter.setPen(QColor(225, 228, 255, 210))
             painter.drawText(thumb_rect, Qt.AlignCenter, f"P{page['page_index'] + 1}")
 
-        page_font = QFont(self.font())
-        page_font.setPointSize(9)
-        page_font.setBold(True)
+        # Info block below the thumbnail: "Page N" + filename.
+        # thumb_h above was sized specifically to leave room for these two
+        # rows plus `clearance` before the icon row, using the same
+        # top_gap/row_gap/font metrics — so this block and the icon row can
+        # never collide, regardless of the platform's font metrics.
+        text_left = rect.left() + 12
+        text_width = rect.width() - 24
+
+        page_rect = QRect(text_left, thumb_rect.bottom() + top_gap, text_width, page_line_h)
+        name_rect = QRect(text_left, page_rect.bottom() + row_gap, text_width, name_line_h)
+
         painter.setFont(page_font)
         painter.setPen(QColor(255, 255, 255, 208))
-        painter.drawText(QRect(rect.left() + 12, thumb_rect.bottom() + 8, rect.width() - 24, 18), Qt.AlignLeft, f"Page {index + 1}")
+        painter.drawText(page_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextDontClip, f"Page {index + 1}")
 
-        name_font = QFont(self.font())
-        name_font.setPointSize(8)
         painter.setFont(name_font)
         painter.setPen(QColor(255, 255, 255, 112))
-        name = _elide(os.path.basename(page["path"]), name_font, rect.width() - 24)
-        painter.drawText(QRect(rect.left() + 12, thumb_rect.bottom() + 26, rect.width() - 24, 18), Qt.AlignLeft, name)
+        name = _elide(os.path.basename(page["path"]), name_font, text_width)
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextDontClip, name)
 
         actions = self._action_rects(rect)
         self._hit_rects.append(("left", index, actions["left"]))
@@ -740,6 +1015,7 @@ class OrganizePdfCanvas(QWidget):
         """)
         self._grid = OrganizePageGrid()
         self._grid.pages_changed.connect(self._on_pages_changed)
+        self._grid.layout_changed.connect(self._sync_height)
         self._scroll.setWidget(self._grid)
         # Ensure scroll viewport has a solid background so it never appears
         # transparent on first show (deferred layout / paint pass issue on Qt5).
@@ -768,9 +1044,24 @@ class OrganizePdfCanvas(QWidget):
         self._drop_pulse = max(0.0, min(1.0, value))
         self._drop_strip.set_progress(self._drag_progress, self._drop_pulse)
 
+    def _viewport_height_for(self, rows):
+        """Height of the scroll viewport that shows exactly `rows` rows of
+        page cards at the grid's *current* card size (self._grid.CARD_H
+        etc. already reflect expanded vs. normal mode via set_expanded)."""
+        g = self._grid
+        rows = max(1, rows)
+        return g.MARGIN * 2 + rows * g.CARD_H + max(0, rows - 1) * g.GAP
+
     def preferred_height(self):
         if self._expanded_workspace:
-            return 650
+            # Fixed 3-row viewport ("3x3" grid) — with 3 columns already
+            # filling the width at the expanded card size, this caps the
+            # visible area to 9 cards; extra pages scroll within it
+            # instead of growing the canvas taller.
+            viewport_h = self._viewport_height_for(3)
+            if self._pages:
+                return self._drop_strip.height() + 8 + viewport_h
+            return viewport_h
         return 520 if self._pages else 276
 
     def showEvent(self, event):

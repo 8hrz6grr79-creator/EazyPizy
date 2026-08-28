@@ -363,10 +363,7 @@ class ImageCompressor(QWidget):
 
     PDF_TOOLS = [
         ("img2pdf",  "IMG → PDF",  "assets/icons/img2pdf.png"),
-        ("pdf2img",  "PDF → IMG",  "assets/icons/pdf2img.png"),
         ("merge",    "Merge",      "assets/icons/merge.png"),
-        ("split",    "Split",      "assets/icons/split.png"),
-        ("compress", "Compress",   "assets/icons/compresspdf.png"),
         ("organize", "Organize",   "assets/icons/organizepdf.png"),
         ("protect",  "Protect",    "assets/icons/protect.png"),
     ]
