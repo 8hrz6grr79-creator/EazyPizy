@@ -6,7 +6,7 @@ from PIL import Image
 from PyQt5.QtWidgets import QWidget, QSizePolicy, QScrollArea, QVBoxLayout
 from PyQt5.QtCore import (
     Qt, QRect, QRectF, QPoint, QSize, pyqtSignal, pyqtProperty,
-    QPropertyAnimation, QEasingCurve, QTimer
+    QTimer
 )
 from PyQt5.QtGui import (
     QColor, QPixmap, QPainter, QPen, QBrush,
@@ -38,14 +38,6 @@ class PdfDropCanvas(QWidget):
         self._hovering = False
         self._drag_progress = 0.0
         self._drop_pulse = 0.0
-
-        self._drag_anim = QPropertyAnimation(self, b"dragProgress", self)
-        self._drag_anim.setDuration(170)
-        self._drag_anim.setEasingCurve(QEasingCurve.OutCubic)
-
-        self._drop_anim = QPropertyAnimation(self, b"dropPulse", self)
-        self._drop_anim.setDuration(260)
-        self._drop_anim.setEasingCurve(QEasingCurve.OutCubic)
 
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
@@ -236,19 +228,16 @@ class PdfDropCanvas(QWidget):
         return exts
 
     def _set_drag_active(self, active):
+        # Was animated over 170ms — now flips the state instantly.
         if self._hovering == active:
             return
         self._hovering = active
-        self._drag_anim.stop()
-        self._drag_anim.setStartValue(self._drag_progress)
-        self._drag_anim.setEndValue(1.0 if active else 0.0)
-        self._drag_anim.start()
+        self.dragProgress = 1.0 if active else 0.0
 
     def _play_drop_pulse(self):
-        self._drop_anim.stop()
-        self._drop_anim.setStartValue(1.0)
-        self._drop_anim.setEndValue(0.0)
-        self._drop_anim.start()
+        # Was a 260ms flash-then-fade pulse on drop — removed, drop
+        # just registers now with no visual pulse.
+        self.dropPulse = 0.0
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -967,13 +956,6 @@ class OrganizePdfCanvas(QWidget):
         self._drop_pulse = 0.0
         self._expanded_workspace = False
 
-        self._drag_anim = QPropertyAnimation(self, b"dragProgress", self)
-        self._drag_anim.setDuration(170)
-        self._drag_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._drop_anim = QPropertyAnimation(self, b"dropPulse", self)
-        self._drop_anim.setDuration(260)
-        self._drop_anim.setEasingCurve(QEasingCurve.OutCubic)
-
         self.setAcceptDrops(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(640)
@@ -1189,19 +1171,16 @@ class OrganizePdfCanvas(QWidget):
             self.height_hint_changed.emit(h)
 
     def _set_drag_active(self, active):
+        # Was animated over 170ms — now flips the state instantly.
         if self._hovering == active:
             return
         self._hovering = active
-        self._drag_anim.stop()
-        self._drag_anim.setStartValue(self._drag_progress)
-        self._drag_anim.setEndValue(1.0 if active else 0.0)
-        self._drag_anim.start()
+        self.dragProgress = 1.0 if active else 0.0
 
     def _play_drop_pulse(self):
-        self._drop_anim.stop()
-        self._drop_anim.setStartValue(1.0)
-        self._drop_anim.setEndValue(0.0)
-        self._drop_anim.start()
+        # Was a 260ms flash-then-fade pulse on drop — removed, drop
+        # just registers now with no visual pulse.
+        self.dropPulse = 0.0
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():

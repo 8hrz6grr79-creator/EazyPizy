@@ -41,6 +41,8 @@ from ui.styles import (
     SIDEBAR_STYLE, PDF_TOOL_BTN_STYLE,
     PDF_COMPACT_PANEL_STYLE, PDF_HEADER_STYLE, PDF_SUBTITLE_STYLE
 )
+from core.updater import UpdateChecker
+from ui.update_dialog import UpdateFlyout
 from ui.helpers import (
     WIN_W, PANEL_H, CROP_PRESETS,
     make_divider, make_icon_btn, make_wm_btn,
@@ -376,7 +378,8 @@ class ImageCompressor(QWidget):
         self.bgremove_path = None
         self._bgremove_done = False   # True only after an actual removal has run
         self.oldPos        = QPoint()
-        self._anim         = None
+        self._anim         = None   # unused now — resize is instant, kept for compat
+        self._pending_target_h = None   # coalesces back-to-back _animate_size calls
         self._thread       = None
         self._worker       = None
         self._bg_thread    = None
@@ -438,6 +441,17 @@ class ImageCompressor(QWidget):
         self._net_monitor.status_changed.connect(self._on_network_status_changed)
         self._net_monitor.start()
 
+        # Update icon stays hidden until a real check finds something
+        # newer — no popups, no auto-download, it just silently appears
+        # (or stays gone) based on what the manifest says. Re-checked
+        # periodically too, since this is a background app that can stay
+        # open for a long time between restarts.
+        self._update_manifest = None
+        self._check_for_update_silently()
+        self._update_poll_timer = QTimer(self)
+        self._update_poll_timer.timeout.connect(self._check_for_update_silently)
+        self._update_poll_timer.start(4 * 60 * 60 * 1000)  # every 4 hours
+
     def _on_network_status_changed(self, online):
         self._is_online = online
 
@@ -472,6 +486,50 @@ class ImageCompressor(QWidget):
         # user stuck on a dead tool.
         if not online and self.mode == self.MODE_BGREMOVE and self.bgremove_path is None:
             self._switch_mode(self.MODE_COMPRESS)
+
+    # ------------------------------------------------------------------
+    # UPDATE — clicking the icon checks now (no background auto-checking)
+    # and, if something newer exists, opens UpdateFlyout which handles the
+    # full download -> install -> restart flow itself.
+    # ------------------------------------------------------------------
+
+    def _check_for_update_silently(self):
+        """Runs in the background with no UI feedback either way — if it
+        finds something newer, the icon appears and the manifest is
+        cached for when the user actually clicks it; if not (or the
+        request fails), the icon just stays hidden, no popups either way."""
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_available.connect(self._on_update_available_silent)
+        self._update_checker.start()
+
+    def _on_update_available_silent(self, manifest):
+        self._update_manifest = manifest
+        # "Unseen" state — the dotted icon draws the eye to it.
+        self.update_btn.setIcon(QIcon("assets/icons/update-notification.png"))
+        self.update_btn.show()
+
+    def _on_update_btn_clicked(self):
+        # This click may be the same click that just told Qt.Popup to
+        # close the flyout (clicking the button while it's open registers
+        # as an "outside click" to the popup, which closes it, and then
+        # this handler fires anyway). Treat a click arriving right after a
+        # close as "toggle off", not "reopen" — otherwise it blinks closed
+        # and immediately back open.
+        last_closed = self.update_btn.property("_flyout_closed_at") or 0
+        if time.time() - last_closed < 0.25:
+            return
+        if not self._update_manifest:
+            return
+
+        # "Seen" state — swap to the plain icon now that the user has
+        # actually looked at the update. Note this resets to the dotted
+        # icon again on the next silent re-check (every 4 hours) if the
+        # app still isn't updated, as a gentle repeat reminder rather
+        # than a one-time thing the user could miss.
+        self.update_btn.setIcon(QIcon("assets/icons/update.png"))
+
+        self._update_flyout = UpdateFlyout(self._update_manifest, self.update_btn, parent=None)
+        self._update_flyout.show_below(QApplication.primaryScreen().geometry())
 
     def toggle_visibility(self):
         if self.isVisible():
@@ -774,6 +832,17 @@ class ImageCompressor(QWidget):
         self.clear_btn = make_icon_btn("assets/icons/trash.png", "Clear", "🗑", size=48)
         self.clear_btn.clicked.connect(self.clear_files)
         bl.addWidget(self.clear_btn)
+
+        # Update icon — plain icon box like the buttons above. Clicking it
+        # checks for updates right then (no background auto-checking) and
+        # opens UpdateFlyout if something newer is found.
+        # Hidden for now — un-comment the .hide() line below to bring it
+        # back once you're ready to ship this feature. Nothing else needs
+        # to change; all the click/check/flyout logic is untouched.
+        self.update_btn = make_icon_btn("assets/icons/update.png", "Check for updates", "⬆", size=48)
+        self.update_btn.clicked.connect(self._on_update_btn_clicked)
+        bl.addWidget(self.update_btn)
+        self.update_btn.hide()
 
         self.bar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         bar_row = QHBoxLayout()
@@ -1792,7 +1861,7 @@ class ImageCompressor(QWidget):
                 self.hint.hide()
                 self.bgremove_panel.show()
                 self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
-                self._anim.finished.connect(self._reveal_bg_sidebar)
+                QTimer.singleShot(0, self._reveal_bg_sidebar)  # after the deferred resize lands
                 self.bgremove_remove_btn.setEnabled(False)
                 self.bgremove_remove_btn.setText("REMOVING\u2026")
                 self.bgremove_save_btn.setEnabled(False)
@@ -1801,7 +1870,7 @@ class ImageCompressor(QWidget):
                 self.hint.hide()
                 self.bgremove_panel.show()
                 self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
-                self._anim.finished.connect(self._reveal_bg_sidebar)
+                QTimer.singleShot(0, self._reveal_bg_sidebar)  # after the deferred resize lands
                 self.bgremove_remove_btn.setEnabled(False)
                 self.bgremove_remove_btn.setText("REMOVE")
                 self.bgremove_save_btn.setEnabled(True)
@@ -1810,7 +1879,7 @@ class ImageCompressor(QWidget):
                 self.hint.hide()
                 self.bgremove_panel.show()
                 self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
-                self._anim.finished.connect(self._reveal_bg_sidebar)
+                QTimer.singleShot(0, self._reveal_bg_sidebar)  # after the deferred resize lands
                 self.bgremove_remove_btn.setEnabled(True)
                 self.bgremove_remove_btn.setText("REMOVE")
                 self.bgremove_save_btn.setEnabled(False)
@@ -2094,7 +2163,7 @@ class ImageCompressor(QWidget):
         self.bg_canvas.set_bg_color(None)
         self.bgremove_panel.show()
         self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
-        self._anim.finished.connect(self._reveal_bg_sidebar)
+        QTimer.singleShot(0, self._reveal_bg_sidebar)  # after the deferred resize lands
 
         self.bgremove_remove_btn.setEnabled(True)
         self.bgremove_remove_btn.setText("REMOVE")
@@ -2183,7 +2252,7 @@ class ImageCompressor(QWidget):
         self.hint.hide()
         self.bgremove_panel.show()
         self._animate_size((self.bar.height() or 80) + 10 + PANEL_H)
-        self._anim.finished.connect(self._reveal_bg_sidebar)
+        QTimer.singleShot(0, self._reveal_bg_sidebar)  # after the deferred resize lands
 
     def _show_bg_sidebar(self):
         self._bg_sidebar.show()
@@ -2988,17 +3057,31 @@ class ImageCompressor(QWidget):
         else:         self.hint.setText(f"{n} files loaded  ·  ready to compress")
 
     def _animate_size(self, target_h):
+        # Was a 240ms QPropertyAnimation with an OutCubic ease — now
+        # resizes instantly. Several call sites (e.g. _switch_mode) call
+        # this more than once in a row — first to shrink back to a
+        # default/reset height, then again to grow to the real target if
+        # there's content to show. With a real animation that was fine
+        # (retargeting the same tween mid-flight, invisible to the user).
+        # With an instant resize, back-to-back calls are two real,
+        # separate resizes — the first one can actually paint for a
+        # frame before the second overwrites it, which is what caused
+        # the window to visibly snap-small-then-stick.
+        #
+        # Fix: defer the actual resize by one event-loop tick and only
+        # ever apply the *last* target_h requested before that tick
+        # fires. Multiple synchronous calls in the same method collapse
+        # into a single resize, straight to the final size, with nothing
+        # visible in between.
         if self.mode == self.MODE_COMPRESS and hasattr(self, 'compress_canvas'):
             self.compress_canvas._sync_state()
-        target = QSize(WIN_W, target_h)
-        if self._anim and self._anim.state() == QPropertyAnimation.Running:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self, b"size")
-        self._anim.setDuration(240)
-        self._anim.setStartValue(self.size())
-        self._anim.setEndValue(target)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.start()
+        self._pending_target_h = target_h
+        QTimer.singleShot(0, self._apply_pending_size)
+
+    def _apply_pending_size(self):
+        if self._pending_target_h is not None:
+            self.resize(QSize(WIN_W, self._pending_target_h))
+            self._pending_target_h = None
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
