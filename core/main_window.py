@@ -335,6 +335,26 @@ class NetworkMonitor(QObject):
         self._stop_flag.set()
 
 
+class _ScanServerStarter(QThread):
+    """Runs ScanServer.start() off the main thread — start() does a real
+    (if normally sub-millisecond) network call, _local_ip(), to work out
+    which local IP to put in the QR code, plus binds a port and spins up
+    the HTTP server. None of that needs to block window construction;
+    the scan server still starts immediately on every launch exactly as
+    before, it just no longer holds up the UI while doing it. Emits
+    ready once start() returns so the tooltip can be updated safely back
+    on the main thread."""
+    ready = pyqtSignal()
+
+    def __init__(self, scan_server, parent=None):
+        super().__init__(parent)
+        self._scan_server = scan_server
+
+    def run(self):
+        self._scan_server.start()
+        self.ready.emit()
+
+
 # =========================================
 # MAIN WINDOW
 # =========================================
@@ -426,13 +446,20 @@ class ImageCompressor(QWidget):
                     pass
             threading.Thread(target=_listen, daemon=True).start()
 
-        # Auto-start scan server immediately on launch
+        # Auto-start scan server immediately on launch — still every time,
+        # same as before, just off the main thread now (see
+        # _ScanServerStarter above) so window construction doesn't wait
+        # on the network call inside start(). In practice this finishes
+        # long before the user could possibly reach for the scan button,
+        # so the QR is effectively always ready when they open it.
         self._scan_server = ScanServer(
             on_file_received=self._scan_callback,
             save_dir=self._scan_tmp_dir(),
         )
-        self._scan_server.start()
-        self._update_scan_btn_tooltip()
+        self._update_scan_btn_tooltip()  # shows "offline" until ready, then flips
+        self._scan_server_starter = _ScanServerStarter(self._scan_server, self)
+        self._scan_server_starter.ready.connect(self._update_scan_btn_tooltip)
+        self._scan_server_starter.start()
 
         # BG Remove needs internet (remove.bg API) — monitor connectivity
         # and enable/disable that tool accordingly.

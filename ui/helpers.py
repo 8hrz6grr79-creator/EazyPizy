@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QFrame, QLabel, QPushButton, QVBoxLayout, QSpinBox
 )
 from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QColor, QIcon, QCursor
+from PyQt5.QtGui import QColor, QIcon, QCursor, QPixmap, QPainter
 
 from ui.styles import ICON_BTN_STYLE, SPINBOX_STYLE
 
@@ -131,8 +131,33 @@ def spin_col(label, min_val, max_val):
 # PAINT HELPERS
 # =========================================
 
+# Cache of pre-rendered 2x2 checkerboard tile pixmaps, keyed by tile size.
+# Built once per size on first use, then reused for the app's whole
+# lifetime — turns thousands of per-frame fillRect() calls into a single
+# drawTiledPixmap() call.
+_checkerboard_tile_cache = {}
+
+
+def _get_checkerboard_tile(tile):
+    pm = _checkerboard_tile_cache.get(tile)
+    if pm is None:
+        pm = QPixmap(tile * 2, tile * 2)
+        c0 = QColor(50, 50, 54)
+        c1 = QColor(40, 40, 44)
+        p = QPainter(pm)
+        p.fillRect(0,    0,    tile, tile, c0)
+        p.fillRect(tile, 0,    tile, tile, c1)
+        p.fillRect(0,    tile, tile, tile, c1)
+        p.fillRect(tile, tile, tile, tile, c0)
+        p.end()
+        _checkerboard_tile_cache[tile] = pm
+    return pm
+
+
 def checkerboard_paint(painter, width, height, tile=12):
-    for row in range(height // tile + 1):
-        for col in range(width // tile + 1):
-            c = QColor(50, 50, 54) if (row + col) % 2 == 0 else QColor(40, 40, 44)
-            painter.fillRect(col * tile, row * tile, tile, tile, c)
+    # Was: nested Python loop calling painter.fillRect() once per tile
+    # (~3,150 calls for a typical 900x500 canvas, every single repaint —
+    # including every frame while dragging a crop handle). Now: one
+    # cached 2x2 tile pixmap, drawn in a single native call that tiles
+    # to fill the requested area. Same visual output, near-zero cost.
+    painter.drawTiledPixmap(0, 0, width, height, _get_checkerboard_tile(tile))

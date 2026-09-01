@@ -7,13 +7,6 @@ import traceback
 # root is on sys.path (so `import ui`, `import tools` etc. resolve).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Must import torch on the main thread before any background threads do —
-# on Windows, torch's DLL loading fails when first imported from a thread.
-try:
-    import torch
-except Exception:
-    pass
-
 from PyQt5.QtWidgets import QApplication
 from core.main_window import ImageCompressor
 

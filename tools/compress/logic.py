@@ -335,18 +335,35 @@ class CompressWorker(QObject):
         hard_min_scale   = 0.10
 
         # ── Phase 1: Try safe compression (quality >= 20, scale >= 0.50) ──
-        scale = 1.0
-        best_buf = None
+        # Was: linear scan from scale=1.0 down to 0.50 in steps of 0.05,
+        # each step running a full ~8-encode binary search over quality
+        # (_bsearch_strict) — up to 11 steps x 8 encodes = ~88 JPEG
+        # encodes just to find a scale that fits.
+        #
+        # Whether a given scale "fits" (some quality in [safe_min_quality,
+        # 95] gets under target) is monotonic in scale: if a smaller scale
+        # fits, every smaller scale also fits. That means the candidates
+        # form a false...false,true...true sequence ordered from largest
+        # scale (index 0, hardest to fit) to smallest (easiest) — exactly
+        # the shape a binary search wants. This finds the same "largest
+        # scale that still fits" result in ~4 steps instead of up to 11.
+        n_steps = int(round((1.0 - safe_min_scale) / 0.05)) + 1
+        scale_candidates = [round(1.0 - i * 0.05, 2) for i in range(n_steps)]
 
-        while scale >= safe_min_scale:
-            nw = max(1, int(w * scale))
-            nh = max(1, int(h * scale))
+        best_buf = None
+        lo, hi = 0, len(scale_candidates) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            sc = scale_candidates[mid]
+            nw = max(1, int(w * sc))
+            nh = max(1, int(h * sc))
             rs = img.resize((nw, nh), Image.LANCZOS)
             buf = self._bsearch_strict(rs, tb, safe_min_quality)
             if buf is not None:
-                best_buf = buf
-                break
-            scale -= 0.05
+                best_buf = buf          # this scale works — try an even larger one
+                hi = mid - 1
+            else:
+                lo = mid + 1            # too big to fit — only smaller scales left
 
         if best_buf is not None:
             with open(dst, "wb") as f:

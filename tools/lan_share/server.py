@@ -21,7 +21,7 @@ import os
 import socket
 import threading
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------------------
 # Clipboard helper
@@ -705,7 +705,14 @@ class ScanServer:
         Handler.received_files   = received_files
         Handler._lock            = lock
 
-        self._server = HTTPServer(("", self.port), Handler)
+        # ThreadingHTTPServer (not plain HTTPServer) — a single in-flight
+        # upload (up to 500MB, see _MAX_UPLOAD_BYTES) used to block every
+        # other request, including the page's own GET /files polling,
+        # until it fully finished reading. received_files access already
+        # goes through self._lock, so this was safe to enable, just never
+        # actually turned on. ThreadingHTTPServer sets daemon_threads=True
+        # by default, so per-request threads don't block process exit.
+        self._server = ThreadingHTTPServer(("", self.port), Handler)
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True)
         self._thread.start()
