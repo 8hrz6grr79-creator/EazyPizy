@@ -5,16 +5,16 @@ from PIL import Image, ImageOps
 
 from PyQt5.QtWidgets import QWidget, QSizePolicy, QPushButton
 from PyQt5.QtCore import (
-    Qt, QPointF, QRect, QRectF, QSizeF,
+    Qt, QPointF, QRect, QRectF,
     pyqtSignal
 )
 from PyQt5.QtGui import (
     QColor, QPixmap, QCursor, QImage,
-    QPainter, QPen, QBrush, QLinearGradient, QConicalGradient, QRadialGradient,
+    QPainter, QPen, QBrush, QLinearGradient,
     QPainterPath, QTransform
 )
 
-from ui.helpers import HANDLE, checkerboard_paint
+from ui.helpers import checkerboard_paint
 
 
 # =========================================

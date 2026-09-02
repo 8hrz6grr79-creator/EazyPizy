@@ -1,20 +1,8 @@
-# --- UI ---
-PyQt5>=5.15
-
-# --- Imaging ---
-Pillow>=10.0
-numpy>=1.24
-
-# --- PDF handling ---
-pypdf>=4.0
-PyPDF2>=3.0        # still used by a few older code paths alongside pypdf
-pdf2image>=1.17    # requires poppler installed on the system separately
-PyMuPDF>=1.23      # imported as `fitz`
-
-# --- Background removal (offline, CPU) ---
-torch>=2.0
-transparent-background>=1.3
-
-# --- LAN scan/share server ---
-qrcode>=7.4
-pyperclip>=1.8
+PyQt5>=5.15.9
+Pillow==10.4.0
+requests>=2.31.0
+pypdf>=3.17.0
+img2pdf>=0.5.1
+qrcode>=7.4.2
+pyperclip>=1.8.2
+keyboard>=0.13.5

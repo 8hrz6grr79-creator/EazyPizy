@@ -159,7 +159,6 @@ class CompressWorker(QObject):
     @staticmethod
     def _apply_images_to_pdf(images, quality, scale):
         """Re-encode all extracted images at the given quality and scale."""
-        import pypdf
         from pypdf.generic import NameObject, NumberObject
 
         for xobj, pil_img, orig_w, orig_h in images:
@@ -191,7 +190,6 @@ class CompressWorker(QObject):
     @staticmethod
     def _remove_pdf_images(writer):
         """Strip ALL image XObjects from every page (last-resort compression)."""
-        from pypdf.generic import DictionaryObject, NameObject
         for page in writer.pages:
             try:
                 res = page.get("/Resources")

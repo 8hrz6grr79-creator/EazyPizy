@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QMenu, QAction, QProgressBar,
     QSizePolicy, QComboBox,
     QDialog, QDialogButtonBox, QSlider,
-    QScrollArea
+    QScrollArea, QSystemTrayIcon
 )
 from PyQt5.QtCore import (
     Qt, QPoint, QSize, QPointF, QRect, QRectF,
@@ -461,6 +461,8 @@ class ImageCompressor(QWidget):
         self._scan_server_starter.ready.connect(self._update_scan_btn_tooltip)
         self._scan_server_starter.start()
 
+        self._setup_tray_icon()
+
         # BG Remove needs internet (remove.bg API) — monitor connectivity
         # and enable/disable that tool accordingly.
         self._is_online = True   # optimistic until first check completes
@@ -558,6 +560,53 @@ class ImageCompressor(QWidget):
         self._update_flyout = UpdateFlyout(self._update_manifest, self.update_btn, parent=None)
         self._update_flyout.show_below(QApplication.primaryScreen().geometry())
 
+    def _setup_tray_icon(self):
+        icon_path = os.path.join("assets", "icons", "logo.png")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
+
+        self._tray_icon = QSystemTrayIcon(icon, self)
+        self._tray_icon.setToolTip("Fastutil — press Insert to open")
+
+        menu = QMenu()
+        open_action = QAction("Open", self)
+        open_action.triggered.connect(self._tray_open)
+        menu.addAction(open_action)
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self._tray_quit)
+        menu.addAction(quit_action)
+
+        self._tray_icon.setContextMenu(menu)
+        self._tray_icon.activated.connect(self._on_tray_activated)
+        self._tray_icon.show()
+
+    def _on_tray_activated(self, reason):
+        # Left-click (Trigger) toggles the window, same as Insert.
+        # Right-click (Context) just opens the menu — Qt handles that itself.
+        if reason == QSystemTrayIcon.Trigger:
+            self.toggle_signal.emit()
+
+    def _tray_open(self):
+        if not self.isVisible():
+            self.toggle_signal.emit()
+        else:
+            self.activateWindow()
+            self.raise_()
+
+    def _tray_quit(self):
+        if getattr(self, '_net_monitor', None):
+            self._net_monitor.stop()
+        if self._scan_server:
+            self._scan_server.stop()
+        self._delete_scan_temps()
+        if self._worker:
+            self._worker.cancel()
+        if self._compress_thread_is_running():
+            self._thread.quit()
+            self._thread.wait(2000)
+        self._tray_icon.hide()
+        QApplication.instance().quit()
+
     def toggle_visibility(self):
         if self.isVisible():
             self.hide()
@@ -615,7 +664,7 @@ class ImageCompressor(QWidget):
     # UI SETUP
     # ------------------------------------------------------------------
     def setup_ui(self):
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         scr = QApplication.primaryScreen().geometry()
         self.setGeometry((scr.width() - WIN_W) // 2, 4, WIN_W, 90)
@@ -3224,6 +3273,18 @@ class ImageCompressor(QWidget):
             pass
 
     def closeEvent(self, e):
+        # Clicking the window's X should behave like the Insert hotkey —
+        # hide, keep running in the background/tray — not fully exit.
+        # Real shutdown only happens via the tray menu's "Quit" action
+        # (see _tray_quit), which does the actual cleanup below.
+        if getattr(self, "_tray_icon", None) is not None:
+            e.ignore()
+            self.hide()
+            self._idealize_timer.start(5000)
+            return
+
+        # Fallback: no tray icon set up (shouldn't normally happen) —
+        # do a real shutdown, same as before.
         if getattr(self, '_net_monitor', None):
             self._net_monitor.stop()
         if self._scan_server:

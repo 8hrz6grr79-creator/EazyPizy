@@ -16,7 +16,7 @@ from PIL import Image
 # (PowerShell):  $env:REMOVEBG_API_KEY = "your-key-here"
 # or add it to a local, git-ignored .env file loaded by your launcher.
 
-REMOVEBG_API_KEY = os.environ.get("REMOVEBG_API_KEY", "W6VWnnzXdBmwcrTPKyVsMxNG")
+REMOVEBG_API_KEY = os.environ.get("REMOVEBG_API_KEY", "")
 REMOVEBG_ENDPOINT = "https://api.remove.bg/v1.0/removebg"
 
 # How long to wait for the API before giving up (seconds)
@@ -44,6 +44,12 @@ def _remove_bg_via_api(pil_image, size="auto", bg_color=None):
     Sends a PIL image to the remove.bg API and returns an RGBA PIL image
     with the background removed.
     """
+    if not REMOVEBG_API_KEY:
+        raise RuntimeError(
+            "remove.bg API key not configured. Set the REMOVEBG_API_KEY "
+            "environment variable and restart the app."
+        )
+
     _warn_missing_key_once()
 
     buf = io.BytesIO()

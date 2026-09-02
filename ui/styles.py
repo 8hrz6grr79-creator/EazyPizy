@@ -8,7 +8,7 @@ QToolTip {
     background: #111113;
     color: rgba(255,255,255,0.85);
     border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 8px;
+    border-radius: 0px;
     padding: 5px 10px;
     font-size: 12px;
 }
@@ -188,6 +188,11 @@ QMenu::item:selected { background: rgba(255,255,255,0.08); color: white; }
 QMenu::item:disabled { color: rgba(255,255,255,0.25); }
 QMenu::separator { height: 1px; background: rgba(255,255,255,0.08); margin: 4px 0; }
 """
+# Rounded again (18px) — safe this time because _show_files_menu() now
+# sets Qt.WA_TranslucentBackground on the QMenu instance itself before
+# showing it, so the window really is transparent outside the rounded
+# shape instead of the QSS radius just being painted over an opaque
+# square window.
 
 SPINBOX_STYLE = """
 QSpinBox {

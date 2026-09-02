@@ -4,7 +4,7 @@ from PIL import Image
 
 from PyQt5.QtWidgets import (
     QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QSizePolicy, QLineEdit, QWidget, QCheckBox, QComboBox
+    QFileDialog, QSizePolicy, QLineEdit, QCheckBox, QComboBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QCursor, QPixmap
@@ -911,6 +911,11 @@ class PdfToolPanel(QFrame):
         self._worker.error.connect(lambda err: self._on_err(err))
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        # Both worker and thread need cleanup here, not just the thread —
+        # every PDF tool action creates a fresh PdfWorker via this method,
+        # and without this line each one was left orphaned on its
+        # now-dead thread instead of actually being deleted.
+        self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
