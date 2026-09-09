@@ -1,4 +1,5 @@
 import os
+import io
 
 from PIL import Image
 
@@ -30,7 +31,7 @@ class PdfToolPanel(QFrame):
     TOOL_TITLES = {
         "img2pdf": "Image to PDF",
         "merge": "Merge PDF",
-        "organize": "Organize PDF",
+        "organize": "PDF",
         "protect": "Protect PDF",
     }
 
@@ -52,7 +53,7 @@ class PdfToolPanel(QFrame):
     )
     # Maps tool_id -> icon filename stem. Only listed here because "organize"
     # the tool_id and "organizer" the icon file don't match.
-    ICON_FILENAMES = {"organize": "organizer", "protect": "protect"}
+    ICON_FILENAMES = {"organize": "pdf", "protect": "protect"}
 
     def __init__(self, tool_id, parent=None):
         super().__init__(parent)
@@ -72,6 +73,7 @@ class PdfToolPanel(QFrame):
         self._go_btn = None
         self._status = None
         self._fade_anim = None
+        self.last_output_dir = None  # set by _output_path() after each save
         self._page_size_combo = None  # Img->PDF specific
         # Protect-PDF specific widgets
         self._pw_input = None
@@ -207,13 +209,9 @@ class PdfToolPanel(QFrame):
             """)
         title = QLabel(self.TOOL_TITLES.get(self.tool_id, "PDF Tool"))
         title.setStyleSheet(PDF_HEADER_STYLE)
-        chevron = QLabel("⌄")
-        chevron.setAlignment(Qt.AlignCenter)
-        chevron.setStyleSheet(PDF_SUBTITLE_STYLE)
         hl.addWidget(badge)
         hl.addWidget(title)
         hl.addStretch(1)
-        hl.addWidget(chevron)
         layout.addWidget(header)
 
     def _build_controls(self, layout, tool_id):
@@ -248,17 +246,22 @@ class PdfToolPanel(QFrame):
     # ------------------------------------------------------------------
     # DIRECT-SAVE OUTPUT PATH
     # ------------------------------------------------------------------
-    # Mirrors the folder/naming/collision convention main_window.py uses
-    # for its other direct-save tools (_do_crop_save, _bgremove_save):
-    # a fixed "<mode>_output" folder next to the app, auto-created, with
-    # a "_N" numeric suffix if the target filename already exists.
-    # "pdf_output" matches the folder open_output_folder() already opens
-    # for MODE_PDF, so the 📂 button keeps working with no changes there.
+    # Saves next to the source file(s) that were actually worked on,
+    # matching the convention main_window.py uses for its other direct-
+    # save tools (_do_crop_save, _bgremove_save) after that change.
+    # PDF_OUTPUT_FOLDER is now only a last-resort fallback for the rare
+    # case no source folder can be determined (e.g. empty input list).
     PDF_OUTPUT_FOLDER = "pdf_output"
 
-    def _output_path(self, filename):
-        folder = os.path.abspath(self.PDF_OUTPUT_FOLDER)
+    def _output_path(self, filename, source_dir=None):
+        if source_dir:
+            folder = os.path.abspath(source_dir)
+        else:
+            folder = os.path.abspath(self.PDF_OUTPUT_FOLDER)
         os.makedirs(folder, exist_ok=True)
+        # Remembered so main_window.py's "open output folder" button can
+        # point at wherever the most recent PDF tool run actually saved.
+        self.last_output_dir = folder
         out = os.path.join(folder, filename)
         if not os.path.exists(out):
             return out
@@ -281,7 +284,9 @@ class PdfToolPanel(QFrame):
         layout.addStretch(1)
 
     # ------------------------------------------------------------------
-    # IMG -> PDF
+    # IMG -> PDF  (retired as a standalone tool — Organize now covers this;
+    # kept here only for reference, never reached since PDF_TOOLS in
+    # main_window.py no longer lists "img2pdf".)
     # ------------------------------------------------------------------
     def _sb_img2pdf(self, layout):
         self._add_common_buttons(layout, "Browse Images", self._add_images)
@@ -308,7 +313,7 @@ class PdfToolPanel(QFrame):
             self._set_status("Add at least one image first.", err=True)
             return
         base = os.path.splitext(os.path.basename(files[0]))[0]
-        out = self._output_path(f"{base}_converted.pdf")
+        out = self._output_path(f"{base}_converted.pdf", source_dir=os.path.dirname(os.path.abspath(files[0])))
         page_size = self._page_size_combo.currentText() if self._page_size_combo else "Fit to Image"
         self._run_worker(self._do_img2pdf, files, out, page_size)
 
@@ -343,17 +348,21 @@ class PdfToolPanel(QFrame):
         return f"Saved {len(pages)} page(s) -> {os.path.basename(out)}"
 
     # ------------------------------------------------------------------
-    # MERGE
+    # MERGE  (retired as a standalone tool — Organize now covers this;
+    # kept here only for reference, never reached since PDF_TOOLS in
+    # main_window.py no longer lists "merge".)
     # ------------------------------------------------------------------
     def _sb_merge(self, layout):
-        self._add_common_buttons(layout, "Browse PDFs", self._add_pdfs_multi)
+        self._add_common_buttons(layout, "Browse PDFs", self._add_organize_files)
         go_btn = self._action_btn("Merge PDF")
         go_btn.clicked.connect(self._run_merge)
         layout.addWidget(go_btn)
         self._go_btn = go_btn
 
-    def _add_pdfs_multi(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select PDFs", "", "PDF (*.pdf)")
+    def _add_organize_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select PDFs or Images", "",
+            "PDFs and Images (*.pdf *.png *.jpg *.jpeg *.webp *.bmp)")
         if files:
             self.canvas.add_files(files)
 
@@ -362,19 +371,15 @@ class PdfToolPanel(QFrame):
         if len(files) < 2:
             self._set_status("Add at least two PDFs.", err=True)
             return
-        out = self._output_path("merged.pdf")
+        out = self._output_path("merged.pdf", source_dir=os.path.dirname(os.path.abspath(files[0])))
         self._run_worker(self._do_merge, files, out)
 
     @staticmethod
     def _do_merge(files, out):
         try:
-            from PyPDF2 import PdfMerger
-            merger = PdfMerger()
-            for f in files:
-                merger.append(f)
-            merger.write(out)
-            merger.close()
-        except ImportError:
+            # pypdf is the actively maintained package and the one listed
+            # in requirements.txt — tried first so a clean venv actually
+            # uses it, rather than silently falling through to PyPDF2.
             import pypdf
             merger = pypdf.PdfWriter()
             for f in files:
@@ -383,25 +388,38 @@ class PdfToolPanel(QFrame):
                     merger.add_page(page)
             with open(out, "wb") as fh:
                 merger.write(fh)
+        except ImportError:
+            # Legacy fallback for environments that only have the older,
+            # now-unmaintained PyPDF2 installed instead of pypdf.
+            from PyPDF2 import PdfMerger
+            merger = PdfMerger()
+            for f in files:
+                merger.append(f)
+            merger.write(out)
+            merger.close()
         return f"Merged {len(files)} files -> {os.path.basename(out)}"
 
     # ------------------------------------------------------------------
-    # ORGANIZE PDF
+    # ORGANIZE PDF  (now the app's single unified PDF tool: accepts PDFs
+    # and images dropped anywhere on the app window, reorder/rotate/delete
+    # pages. Save PDF lives on the main window's top bar, not here.)
     # ------------------------------------------------------------------
     def _sb_organize(self, layout):
-        self._add_common_buttons(layout, "Browse PDFs", self._add_pdfs_multi)
-        expand_btn = self._secondary_btn("Expand", 34)
+        clear_btn = self._secondary_btn("Clear", 34)
+        clear_btn.clicked.connect(self.canvas.clear)
+        layout.addWidget(clear_btn)
+        layout.addStretch(1)
+
+        expand_btn = self._secondary_btn("Organize", 34)
         expand_btn.clicked.connect(self._toggle_organize_expanded)
         layout.addWidget(expand_btn)
         self._expand_btn = expand_btn
         self._organize_expanded = False
-        go_btn = self._action_btn("Save PDF")
-        go_btn.clicked.connect(self._run_organize)
-        layout.addWidget(go_btn)
-        self._go_btn = go_btn
 
     def _toggle_organize_expanded(self):
-        """Grow/shrink the Organize canvas in place — no separate window.
+        """Switch between the compact per-file card view (default) and the
+        full per-page editor (reorder/rotate/delete individual pages) —
+        triggered by the "Organize"/"Done" button, no separate window.
 
         set_expanded_workspace() already resizes the page grid's cards and
         emits height_hint_changed, which _sync_panel_height() below is
@@ -412,19 +430,23 @@ class PdfToolPanel(QFrame):
             return
         self._organize_expanded = not self._organize_expanded
         self.canvas.set_expanded_workspace(self._organize_expanded)
-        self._expand_btn.setText("Collapse" if self._organize_expanded else "Expand")
+        self._expand_btn.setText("Done" if self._organize_expanded else "Organize")
         self._sync_panel_height()
 
     def _run_organize(self):
         pages = self.canvas.get_pages()
         if not pages:
-            self._set_status("Add PDF pages first.", err=True)
+            self._set_status("Add PDF pages or images first.", err=True)
             return
-        out = self._output_path("organized.pdf")
+        out = self._output_path("organized.pdf", source_dir=os.path.dirname(os.path.abspath(pages[0]["path"])))
         self._run_worker(self._do_organize, pages, out)
 
     # ------------------------------------------------------------------
     # PROTECT PDF — compact custom layout
+    # (Retired as a standalone tool — password-protect now lives inside
+    # Organize's own save step, see _build_organize_password_section and
+    # _do_organize. Kept here only for reference, never reached since
+    # PDF_TOOLS in main_window.py no longer lists "protect".)
     # ------------------------------------------------------------------
     def _build_protect_layout(self, layout):
         """Build the full compact Protect PDF panel in one vertical layout.
@@ -712,7 +734,8 @@ class PdfToolPanel(QFrame):
         else:
             # Save to a new file in the pdf_output folder.
             base = os.path.splitext(os.path.basename(self._protect_path))[0]
-            out = self._output_path(f"{base}_protected.pdf")
+            out = self._output_path(f"{base}_protected.pdf",
+                                     source_dir=os.path.dirname(os.path.abspath(self._protect_path)))
 
         self._run_worker(self._do_protect, self._protect_path, out, pw, overwrite)
 
@@ -787,16 +810,69 @@ class PdfToolPanel(QFrame):
 
     @staticmethod
     def _do_organize(pages, out):
+        """Builds the final PDF from a mix of real PDF pages and standalone
+        images — each image becomes its own single-page PDF in memory, via
+        Pillow, then gets folded into the same writer as a normal page.
+        This is now the app's one PDF save path, replacing what used to be
+        three separate tools (Image→PDF, Merge, Organize)."""
         import copy
+
+        IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+
+        def _image_to_pdf_buffer(image_path):
+            img = Image.open(image_path).convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="PDF")
+            buf.seek(0)
+            return buf
+
+        # Keeps in-memory PDF buffers/readers alive until writer.write()
+        # actually consumes their pages — letting them get garbage
+        # collected early would corrupt the output.
+        keep_alive = []
+
         try:
+            # pypdf is the actively maintained package and the one listed
+            # in requirements.txt — tried first so a clean venv actually
+            # uses it, rather than silently falling through to PyPDF2.
+            import pypdf
+            writer = pypdf.PdfWriter()
+            readers = {}
+            for item in pages:
+                path = item["path"]
+                if os.path.splitext(path)[1].lower() in IMAGE_EXTS:
+                    buf = _image_to_pdf_buffer(path)
+                    reader = pypdf.PdfReader(buf)
+                    keep_alive.append((buf, reader))
+                    page = reader.pages[0]
+                else:
+                    if path not in readers:
+                        readers[path] = pypdf.PdfReader(path)
+                    page = copy.copy(readers[path].pages[item["page_index"]])
+                rotation = item.get("rotation", 0) % 360
+                if rotation:
+                    page.rotate(rotation)
+                writer.add_page(page)
+
+            with open(out, "wb") as fh:
+                writer.write(fh)
+        except ImportError:
+            # Legacy fallback for environments that only have the older,
+            # now-unmaintained PyPDF2 installed instead of pypdf.
             from PyPDF2 import PdfReader, PdfWriter
             writer = PdfWriter()
             readers = {}
             for item in pages:
                 path = item["path"]
-                if path not in readers:
-                    readers[path] = PdfReader(path)
-                page = copy.copy(readers[path].pages[item["page_index"]])
+                if os.path.splitext(path)[1].lower() in IMAGE_EXTS:
+                    buf = _image_to_pdf_buffer(path)
+                    reader = PdfReader(buf)
+                    keep_alive.append((buf, reader))
+                    page = reader.pages[0]
+                else:
+                    if path not in readers:
+                        readers[path] = PdfReader(path)
+                    page = copy.copy(readers[path].pages[item["page_index"]])
                 rotation = item.get("rotation", 0) % 360
                 if rotation:
                     if hasattr(page, "rotate"):
@@ -804,23 +880,10 @@ class PdfToolPanel(QFrame):
                     else:
                         page.rotate_clockwise(rotation)
                 writer.add_page(page)
+
             with open(out, "wb") as fh:
                 writer.write(fh)
-        except ImportError:
-            import pypdf
-            writer = pypdf.PdfWriter()
-            readers = {}
-            for item in pages:
-                path = item["path"]
-                if path not in readers:
-                    readers[path] = pypdf.PdfReader(path)
-                page = copy.copy(readers[path].pages[item["page_index"]])
-                rotation = item.get("rotation", 0) % 360
-                if rotation:
-                    page.rotate(rotation)
-                writer.add_page(page)
-            with open(out, "wb") as fh:
-                writer.write(fh)
+
         return f"Saved {len(pages)} page(s) -> {os.path.basename(out)}"
 
     # ------------------------------------------------------------------

@@ -383,11 +383,12 @@ class ImageCompressor(QWidget):
     MODE_BGREMOVE = "bgremove"
     MODE_PDF      = "pdf"
 
+    # Organize is now the single, unified PDF tool — it accepts both PDFs
+    # and images, supports reorder/rotate/delete, and has optional
+    # password-protect built into its own save step. The separate
+    # Image→PDF, Merge, and Protect tools/buttons have been retired.
     PDF_TOOLS = [
-        ("img2pdf",  "IMG → PDF",  "assets/icons/img2pdf.png"),
-        ("merge",    "Merge",      "assets/icons/merge.png"),
         ("organize", "Organize",   "assets/icons/organizepdf.png"),
-        ("protect",  "Protect",    "assets/icons/protect.png"),
     ]
 
     def __init__(self):
@@ -460,6 +461,11 @@ class ImageCompressor(QWidget):
         self._scan_server_starter = _ScanServerStarter(self._scan_server, self)
         self._scan_server_starter.ready.connect(self._update_scan_btn_tooltip)
         self._scan_server_starter.start()
+
+        # Tracks the folder that "open output folder" should point to —
+        # updated after each save, since results now land next to their
+        # own source files rather than one fixed shared folder.
+        self._last_output_dir = None
 
         self._setup_tray_icon()
 
@@ -565,7 +571,7 @@ class ImageCompressor(QWidget):
         icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
 
         self._tray_icon = QSystemTrayIcon(icon, self)
-        self._tray_icon.setToolTip("Fastutil — press Insert to open")
+        self._tray_icon.setToolTip("EazyPizy — press Insert to open")
 
         menu = QMenu()
         open_action = QAction("Open", self)
@@ -714,6 +720,10 @@ class ImageCompressor(QWidget):
             self.logo.setText("✦")
             self.logo.setAlignment(Qt.AlignCenter)
             self.logo.setStyleSheet("background:#5865F2; border-radius:12px; color:white; font-size:18px;")
+        self.logo.setCursor(QCursor(Qt.PointingHandCursor))
+        self.logo.setToolTip("Click to minimize")
+        self.logo.installEventFilter(self)
+        self._logo_press_pos = None
         bl.addWidget(self.logo)
         bl.addWidget(make_divider())
 
@@ -863,6 +873,24 @@ class ImageCompressor(QWidget):
 
         self.pdf_bar_controls.hide()
         bl.addWidget(self.pdf_bar_controls)
+
+        # Organize (PDF) bar controls — Save PDF lives on the top bar,
+        # same as Crop/BG Remove's own action buttons, not inside the panel.
+        self.organize_bar_controls = QFrame()
+        self.organize_bar_controls.setStyleSheet("background:transparent; border:none;")
+        obl = QHBoxLayout(self.organize_bar_controls)
+        obl.setContentsMargins(0, 0, 0, 0)
+        obl.setSpacing(5)
+        self.organize_save_btn = QPushButton("SAVE PDF")
+        self.organize_save_btn.setFixedHeight(48)
+        self.organize_save_btn.setMinimumWidth(130)
+        self.organize_save_btn.setStyleSheet(ACTION_BTN_STYLE)
+        self.organize_save_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.organize_save_btn.setEnabled(False)   # nothing loaded yet
+        self.organize_save_btn.clicked.connect(self._organize_save_clicked)
+        obl.addWidget(self.organize_save_btn)
+        self.organize_bar_controls.hide()
+        bl.addWidget(self.organize_bar_controls)
 
         bl.addSpacing(8)
         self.crop_dim_lbl = QLabel("")
@@ -1862,6 +1890,9 @@ class ImageCompressor(QWidget):
             panel = PdfToolPanel(tool_id)
             panel.hide()
             panel.height_hint_changed.connect(self._on_pdf_panel_height_changed)
+            panel.canvas.files_changed.connect(
+                lambda files, tid=tool_id: self._on_organize_files_changed(tid, files)
+            )
             self._pdf_panels[tool_id] = panel
             self._outer.addWidget(panel, 0, Qt.AlignHCenter)
 
@@ -1885,6 +1916,7 @@ class ImageCompressor(QWidget):
         self.crop_bar_controls.hide()
         self.bgremove_bar_controls.hide()
         self.pdf_bar_controls.hide()
+        self.organize_bar_controls.hide()
         self.crop_dim_lbl.hide()
         self.hint.show()
         self._animate_size(self.bar.height() or 80)
@@ -1967,10 +1999,24 @@ class ImageCompressor(QWidget):
                 if imgs:
                     self._preview_bgremove_source(imgs[-1])
         elif mode == self.MODE_PDF:
-            self.pdf_bar_controls.show()
-            for btn in self._pdf_tool_btns.values():
-                btn.setChecked(False)
-            self.hint.setText("Choose a PDF tool above  ·  then drop files below")
+            # Only one PDF tool exists now (Organize), so skip the
+            # tool-selector row entirely and go straight into it.
+            self.pdf_bar_controls.hide()
+            self.organize_bar_controls.show()
+            self._active_pdf_tool = "organize"
+            panel = self._pdf_panels["organize"]
+            has_pages = bool(panel.canvas.get_pages())
+            self.organize_save_btn.setEnabled(has_pages)
+            if has_pages:
+                # Revisiting with content already loaded — restore instantly.
+                self.hint.hide()
+                panel.show()
+                self._animate_size((self.bar.height() or 80) + 10 + panel.height())
+            else:
+                # Matches Compress/Crop/BG Remove: nothing shows until a
+                # file actually lands (dropped anywhere on the window).
+                panel.hide()
+                self._animate_size(self.bar.height() or 80)
 
     def _on_pdf_tool_btn(self, tool_id):
         for tid, btn in self._pdf_tool_btns.items():
@@ -1987,6 +2033,26 @@ class ImageCompressor(QWidget):
         if self.mode == self.MODE_PDF and self._active_pdf_tool:
             self._animate_size((self.bar.height() or 80) + 10 + height)
 
+    def _on_organize_files_changed(self, tool_id, files):
+        """Reveal/hide the Organize panel and its top-bar Save button as
+        files are added/removed — mirrors how Compress/Crop/BG Remove only
+        show their canvas once something is actually loaded."""
+        self.organize_save_btn.setEnabled(bool(files))
+        if self.mode != self.MODE_PDF or self._active_pdf_tool != tool_id:
+            return
+        panel = self._pdf_panels[tool_id]
+        if files:
+            panel.show()
+            self._animate_size((self.bar.height() or 80) + 10 + panel.height())
+        else:
+            panel.hide()
+            self._animate_size(self.bar.height() or 80)
+
+    def _organize_save_clicked(self):
+        panel = self._pdf_panels.get(self._active_pdf_tool) if self._active_pdf_tool else None
+        if panel is not None:
+            panel._run_organize()
+
     # ------------------------------------------------------------------
     # DRAG & DROP
     # ------------------------------------------------------------------
@@ -1996,7 +2062,7 @@ class ImageCompressor(QWidget):
 
     def dropEvent(self, e):
         paths = [url.toLocalFile() for url in e.mimeData().urls()]
-        valid_img = ('.png', '.jpg', '.jpeg', '.webp')
+        valid_img = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
         for path in paths:
             ext = os.path.splitext(path)[1].lower()
             if ext in valid_img or ext == '.pdf':
@@ -2189,7 +2255,7 @@ class ImageCompressor(QWidget):
                 cropped = cropped.resize((p_w, p_h), Image.LANCZOS)
                 save_dpi = (72, 72)
 
-        folder = "cropped_images"
+        folder = os.path.dirname(os.path.abspath(self.crop_path))
         os.makedirs(folder, exist_ok=True)
         name, ext = os.path.splitext(os.path.basename(self.crop_path))
         ext = ext or ".png"
@@ -2203,6 +2269,7 @@ class ImageCompressor(QWidget):
             if save_dpi:
                 save_kwargs["dpi"] = save_dpi
             cropped.save(out, **save_kwargs)
+            self._last_output_dir = folder
             self.crop_save_btn.setText("✓  Saved!")
             QApplication.processEvents()
             time.sleep(0.8)
@@ -2587,7 +2654,7 @@ class ImageCompressor(QWidget):
         if result is None:
             QMessageBox.warning(self, "Nothing to save", "Remove a background first.")
             return
-        folder = "removed_bg"
+        folder = os.path.dirname(os.path.abspath(self.bgremove_path))
         os.makedirs(folder, exist_ok=True)
         name, _ = os.path.splitext(os.path.basename(self.bgremove_path))
         ext = ".png" if self.bg_canvas._bg_mode == "none" else ".jpg"
@@ -2598,6 +2665,7 @@ class ImageCompressor(QWidget):
             c += 1
         try:
             result.save(out)
+            self._last_output_dir = folder
             self._scan_temps.discard(self.bgremove_path)
             self.bgremove_save_btn.setText("✓  Saved!")
             QApplication.processEvents()
@@ -2680,7 +2748,7 @@ class ImageCompressor(QWidget):
         self.progress_bar.show()
 
         self._thread = QThread(self)
-        self._worker = CompressWorker(files_with_targets, "compressed_images",
+        self._worker = CompressWorker(files_with_targets,
                                       force_compress=force_compress)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -2762,6 +2830,14 @@ class ImageCompressor(QWidget):
         self.progress_bar.setValue(self.progress_bar.value() + 1)
 
     def _on_all_done(self):
+        # Track where the compressed files actually landed (next to their
+        # own source files now, not a fixed shared folder) so "open output
+        # folder" has somewhere sensible to point to.
+        if getattr(self, '_worker', None) is not None:
+            out_dir = getattr(self._worker, 'last_output_dir', None)
+            if out_dir:
+                self._last_output_dir = out_dir
+
         # Any scanned files that were compressed are now saved — remove from temps
         for p in list(self.files):
             self._scan_temps.discard(p)
@@ -3016,7 +3092,7 @@ class ImageCompressor(QWidget):
         self._quality_limited_files = []           # reset
 
         self._thread = QThread(self)
-        self._worker = CompressWorker(files_with_targets, "compressed_images",
+        self._worker = CompressWorker(files_with_targets,
                                       force_compress=True)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -3050,6 +3126,10 @@ class ImageCompressor(QWidget):
 
     def _on_force_all_done(self):
         """All force compressions finished."""
+        if getattr(self, '_worker', None) is not None:
+            out_dir = getattr(self._worker, 'last_output_dir', None)
+            if out_dir:
+                self._last_output_dir = out_dir
         self.compress_btn.setEnabled(True)
         self.compress_btn.setText("COMPRESS")
         self.add_btn.setEnabled(True)
@@ -3116,11 +3196,32 @@ class ImageCompressor(QWidget):
             self._animate_size(self.bar.height() or 80)
 
     def open_output_folder(self):
-        if self.mode == self.MODE_CROP:         folder = "cropped_images"
-        elif self.mode == self.MODE_BGREMOVE:   folder = "removed_bg"
-        elif self.mode == self.MODE_PDF:        folder = "pdf_output"
-        else:                                   folder = "compressed_images"
-        folder = os.path.abspath(folder)
+        # Crop / BG Remove / Compress now save next to each file's own
+        # source folder rather than one fixed shared folder, so we open
+        # wherever the most recent save actually landed.
+        if self.mode in (self.MODE_CROP, self.MODE_BGREMOVE, self.MODE_COMPRESS):
+            if not self._last_output_dir:
+                QMessageBox.information(
+                    self, "No output yet",
+                    "Save a file first — this opens the folder your most "
+                    "recently saved file was written to."
+                )
+                return
+            folder = self._last_output_dir
+        elif self.mode == self.MODE_PDF:
+            panel = self._pdf_panels.get(self._active_pdf_tool) if hasattr(self, '_pdf_panels') else None
+            out_dir = getattr(panel, 'last_output_dir', None) if panel else None
+            if not out_dir:
+                QMessageBox.information(
+                    self, "No output yet",
+                    "Save a PDF first — this opens the folder your most "
+                    "recently saved file was written to."
+                )
+                return
+            folder = out_dir
+        else:
+            folder = self._last_output_dir or os.path.abspath("compressed_images")
+
         os.makedirs(folder, exist_ok=True)
         if sys.platform == "win32":    os.startfile(folder)
         elif sys.platform == "darwin": os.system(f'open "{folder}"')
@@ -3206,7 +3307,7 @@ class ImageCompressor(QWidget):
 
     def eventFilter(self, obj, event):
         from PyQt5.QtCore import QEvent
-        if obj is self.scan_btn:
+        if getattr(self, 'scan_btn', None) is not None and obj is self.scan_btn:
             if event.type() == QEvent.Enter:
                 self._show_qr_flyout()
             elif event.type() == QEvent.Leave:
@@ -3214,6 +3315,24 @@ class ImageCompressor(QWidget):
                 if self._scan_dlg and self._scan_dlg.isVisible():
                     # Let the flyout's own leave-event close itself
                     pass
+        elif obj is self.logo:
+            if event.type() == QEvent.MouseButtonPress:
+                self._logo_press_pos = event.globalPos()
+                # Don't consume it — let the event keep propagating up to
+                # the window's own mousePressEvent too, so dragging the
+                # window by grabbing the logo still works as before.
+            elif event.type() == QEvent.MouseButtonRelease:
+                press_pos = self._logo_press_pos
+                self._logo_press_pos = None
+                moved = False
+                if press_pos is not None:
+                    delta = event.globalPos() - press_pos
+                    moved = abs(delta.x()) > 4 or abs(delta.y()) > 4
+                if not moved:
+                    # A genuine click (not a drag) — minimize immediately,
+                    # same hide-to-tray behavior as the Insert hotkey /
+                    # tray icon, restorable the same two ways.
+                    self.toggle_signal.emit()
         return super().eventFilter(obj, event)
 
     def _show_qr_flyout(self):

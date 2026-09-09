@@ -18,9 +18,14 @@ class CompressWorker(QObject):
     # (index, filename, achieved_kb, target_kb, output_path)
     quality_limit = pyqtSignal(int, str, float, float, str)
 
-    def __init__(self, files_with_targets, output_folder, force_compress=True):
+    def __init__(self, files_with_targets, output_folder=None, force_compress=True):
         """
         files_with_targets: list of (path, target_kb) tuples
+
+        output_folder is no longer used to pick a shared destination —
+        each compressed file is saved next to its own source file, so
+        results land back where the user dragged them from. The param
+        is kept (accepting None) so existing call sites don't break.
 
         force_compress is always treated as True: the worker automatically
         pushes through the aggressive quality/downscale phases to get as
@@ -29,16 +34,17 @@ class CompressWorker(QObject):
         """
         super().__init__()
         self.files_with_targets = files_with_targets
-        self.output_folder = output_folder
         self.force_compress = True
         self._cancelled = False
+        # Set to the folder of the most recently written output file, so
+        # the UI's "open output folder" button has somewhere to point to.
+        self.last_output_dir = None
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
         import shutil
-        os.makedirs(self.output_folder, exist_ok=True)
         for i, (path, target_kb) in enumerate(self.files_with_targets):
             if self._cancelled:
                 break
@@ -46,13 +52,14 @@ class CompressWorker(QObject):
                 fn = os.path.basename(path)
                 name, ext = os.path.splitext(fn)
                 orig_kb = os.path.getsize(path) / 1024
+                out_dir = os.path.dirname(os.path.abspath(path))
+                os.makedirs(out_dir, exist_ok=True)
+                self.last_output_dir = out_dir
 
-                # Already at or below target — leave it untouched, just
-                # copy the original file over as-is (same format, no
-                # re-encoding, no quality loss).
+                # Already at or below target — the file already lives in
+                # out_dir (its own source folder), so there's nothing to
+                # copy; just leave it untouched.
                 if orig_kb <= target_kb:
-                    out = os.path.join(self.output_folder, f"{name}{ext}")
-                    shutil.copy2(path, out)
                     self.progress.emit(
                         i,
                         f"✓  {fn}   {orig_kb:.0f} KB   already ≤ {target_kb:.0f} KB target — kept as-is"
@@ -60,11 +67,11 @@ class CompressWorker(QObject):
                     continue
 
                 if ext.lower() == '.pdf':
-                    out = os.path.join(self.output_folder, f"{name}_compressed.pdf")
+                    out = os.path.join(out_dir, f"{name}_compressed.pdf")
                     comp_kb, hit_limit = self._compress_pdf(path, out, target_kb,
                                                             force=self.force_compress)
                 else:
-                    out = os.path.join(self.output_folder, f"{name}_compressed.jpg")
+                    out = os.path.join(out_dir, f"{name}_compressed.jpg")
                     comp_kb, hit_limit = self._compress(path, out, target_kb,
                                                         force=self.force_compress)
 

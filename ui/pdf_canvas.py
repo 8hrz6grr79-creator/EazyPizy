@@ -947,6 +947,20 @@ class OrganizePdfCanvas(QWidget):
     files_changed = pyqtSignal(list)
     height_hint_changed = pyqtSignal(int)
 
+    # Organize now accepts both PDFs and standalone images — an image is
+    # treated as a single-page "document" that gets converted to a PDF
+    # page at save time (see PdfToolPanel._do_organize).
+    IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+
+    @classmethod
+    def _is_supported(cls, path):
+        ext = os.path.splitext(path)[1].lower()
+        return ext == ".pdf" or ext in cls.IMAGE_EXTS
+
+    @classmethod
+    def _is_image(cls, path):
+        return os.path.splitext(path)[1].lower() in cls.IMAGE_EXTS
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._files = []
@@ -1008,6 +1022,33 @@ class OrganizePdfCanvas(QWidget):
         vp.setPalette(pal)
         layout.addWidget(self._scroll)
 
+        # ---- Compact file-card view (the default) ----
+        # Shows one card per loaded file (thumbnail, name, size, reorder
+        # arrows, remove) instead of every individual page — the full
+        # per-page editor below is only shown after clicking "Organize".
+        self.FILE_GRID_MAX_ROWS = 2
+        self._file_grid = _FileCardGrid()
+        self._file_grid.remove_requested.connect(self._on_compact_remove)
+        self._file_grid.move_requested.connect(self._on_compact_move)
+
+        self._file_scroll = QScrollArea()
+        self._file_scroll.setWidgetResizable(True)
+        self._file_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._file_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._file_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._file_scroll.setStyleSheet(self._scroll.styleSheet())
+        self._file_scroll.setWidget(self._file_grid)
+        fvp = self._file_scroll.viewport()
+        fvp.setAutoFillBackground(True)
+        fpal = fvp.palette()
+        fpal.setColor(QPalette.Window, QColor(30, 30, 34))
+        fvp.setPalette(fpal)
+        layout.addWidget(self._file_scroll)
+
+        # Compact view is the default — full page editor stays hidden
+        # until set_expanded_workspace(True) is called.
+        self._scroll.hide()
+
     @pyqtProperty(float)
     def dragProgress(self):
         return self._drag_progress
@@ -1034,6 +1075,18 @@ class OrganizePdfCanvas(QWidget):
         rows = max(1, rows)
         return g.MARGIN * 2 + rows * g.CARD_H + max(0, rows - 1) * g.GAP
 
+    def _compact_viewport_height(self):
+        g = self._file_grid
+        rows = min(self.FILE_GRID_MAX_ROWS, max(1, self._file_grid_rows_needed()))
+        return g.MARGIN * 2 + rows * g.CARD_H + max(0, rows - 1) * g.GAP
+
+    def _file_grid_rows_needed(self):
+        n = len(self._grouped_file_order())
+        if not n:
+            return 0
+        cols = self._file_grid.cols()
+        return -(-n // cols)  # ceil division
+
     def preferred_height(self):
         if self._expanded_workspace:
             # Fixed 3-row viewport ("3x3" grid) — with 3 columns already
@@ -1044,7 +1097,10 @@ class OrganizePdfCanvas(QWidget):
             if self._pages:
                 return self._drop_strip.height() + 8 + viewport_h
             return viewport_h
-        return 520 if self._pages else 276
+        # Compact file-card view (the default).
+        if not self._pages:
+            return 276
+        return self._drop_strip.height() + 8 + self._compact_viewport_height()
 
     def showEvent(self, event):
         """Force a full repaint on first show to eliminate transparent region.
@@ -1062,12 +1118,16 @@ class OrganizePdfCanvas(QWidget):
 
     def _force_repaint(self):
         self._scroll.viewport().update()
+        self._file_scroll.viewport().update()
         self._grid.update()
+        self._file_grid.update()
         self.update()
 
     def set_expanded_workspace(self, expanded):
         self._expanded_workspace = expanded
         self._grid.set_expanded(expanded)
+        self._scroll.setVisible(expanded)
+        self._file_scroll.setVisible(not expanded)
         self._sync_height()
 
     def get_files(self):
@@ -1083,6 +1143,7 @@ class OrganizePdfCanvas(QWidget):
         self._files = []
         self._pages = []
         self._grid.set_pages(self._pages)
+        self._sync_file_grid()
         self._drop_strip.hide()  # no pages → hide the add-more strip
         self._sync_height()
         self.files_changed.emit([])
@@ -1090,7 +1151,7 @@ class OrganizePdfCanvas(QWidget):
     def add_files(self, paths):
         added = False
         for path in paths:
-            if not path or os.path.splitext(path)[1].lower() != ".pdf":
+            if not path or not self._is_supported(path):
                 continue
             if path in self._files:
                 # Already loaded — skip re-rendering/re-appending its pages
@@ -1098,24 +1159,98 @@ class OrganizePdfCanvas(QWidget):
                 # every time the same file is dropped/browsed again.
                 continue
             self._files.append(path)
-            page_count = self._page_count(path)
-            thumbs = self._render_thumbnails(path, page_count)
-            for page_index in range(page_count):
+            if self._is_image(path):
+                thumb = self._render_image_thumbnail(path)
                 self._pages.append({
                     "path": path,
-                    "page_index": page_index,
+                    "page_index": 0,
                     "rotation": 0,
-                    "thumb": thumbs[page_index] if page_index < len(thumbs) else None,
+                    "thumb": thumb,
                 })
-            added = added or page_count > 0
+                added = True
+            else:
+                page_count = self._page_count(path)
+                thumbs = self._render_thumbnails(path, page_count)
+                for page_index in range(page_count):
+                    self._pages.append({
+                        "path": path,
+                        "page_index": page_index,
+                        "rotation": 0,
+                        "thumb": thumbs[page_index] if page_index < len(thumbs) else None,
+                    })
+                added = added or page_count > 0
         if added:
             self._play_drop_pulse()
             self._grid.set_pages(self._pages)
+            self._sync_file_grid()
             # Reveal the add-more strip now that pages exist
             if self._drop_strip.isHidden():
                 self._drop_strip.show()
             self._sync_height()
             self.files_changed.emit(list(self._files))
+
+    def _render_image_thumbnail(self, path):
+        try:
+            px = QPixmap(path)
+            if px.isNull():
+                return None
+            # Matches the rough on-screen size fitz thumbnails render at
+            # (0.48 zoom on a typical page) — the grid scales with
+            # KeepAspectRatio anyway, so this just avoids holding a huge
+            # full-resolution pixmap in memory per image.
+            return px.scaled(360, 480, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        except Exception:
+            return None
+
+    def _grouped_file_order(self):
+        """Unique file paths in order of first appearance among self._pages
+        — the file-level ordering the compact card view presents, even
+        though the underlying data is still a flat list of pages."""
+        seen = []
+        for page in self._pages:
+            if page["path"] not in seen:
+                seen.append(page["path"])
+        return seen
+
+    def _sync_file_grid(self):
+        """Rebuild the compact per-file card view from the current page
+        list — one card per file, using that file's first page/image
+        thumbnail as its preview."""
+        files = self._grouped_file_order()
+        previews = []
+        seen_thumb = {}
+        for page in self._pages:
+            if page["path"] not in seen_thumb:
+                seen_thumb[page["path"]] = page.get("thumb")
+        for f in files:
+            previews.append(seen_thumb.get(f))
+        self._file_grid.set_files(files, previews)
+
+    def _on_compact_remove(self, index):
+        """Remove every page belonging to the file at this position in the
+        compact card view."""
+        files = self._grouped_file_order()
+        if not (0 <= index < len(files)):
+            return
+        target = files[index]
+        self._pages = [p for p in self._pages if p["path"] != target]
+        self._grid.set_pages(self._pages)
+        self._on_pages_changed()
+
+    def _on_compact_move(self, index, delta):
+        """Reorder whole files (i.e. their entire page block, in whatever
+        internal order those pages already had) in the compact card view."""
+        files = self._grouped_file_order()
+        target = index + delta
+        if not (0 <= index < len(files)) or not (0 <= target < len(files)):
+            return
+        files[index], files[target] = files[target], files[index]
+        new_pages = []
+        for f in files:
+            new_pages.extend([p for p in self._pages if p["path"] == f])
+        self._pages = new_pages
+        self._grid.set_pages(self._pages)
+        self._on_pages_changed()
 
     def _on_pages_changed(self):
         """Called when the grid mutates pages (rotate, delete, reorder)."""
@@ -1125,6 +1260,7 @@ class OrganizePdfCanvas(QWidget):
             if page["path"] not in seen:
                 seen.append(page["path"])
         self._files = seen
+        self._sync_file_grid()
         # Sync strip visibility: hide when all pages have been deleted
         if self._pages and self._drop_strip.isHidden():
             self._drop_strip.show()
@@ -1185,7 +1321,7 @@ class OrganizePdfCanvas(QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             paths = [url.toLocalFile() for url in event.mimeData().urls()]
-            if any(os.path.splitext(path)[1].lower() == ".pdf" for path in paths):
+            if any(self._is_supported(path) for path in paths):
                 self._set_drag_active(True)
                 event.acceptProposedAction()
                 return
@@ -1202,7 +1338,7 @@ class OrganizePdfCanvas(QWidget):
         self._set_drag_active(False)
         self.add_files([
             url.toLocalFile() for url in event.mimeData().urls()
-            if os.path.splitext(url.toLocalFile())[1].lower() == ".pdf"
+            if self._is_supported(url.toLocalFile())
         ])
         event.acceptProposedAction()
 
