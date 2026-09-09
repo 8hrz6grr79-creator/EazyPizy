@@ -1,0 +1,83 @@
+# ─── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# ─── Virtual environment ────────────────────────────────
+venv/
+env/
+.venv/
+
+# ─── Secrets / local config ─────────────────────────────
+.env
+*.env.local
+
+# ─── Nuitka build artifacts ──────────────────────────────
+*.build/
+*.dist/
+*.onefile-build/
+*.build.log
+nuitka-crash-report.xml
+
+# ─── PyInstaller build artifacts (if ever used again) ────
+build/
+dist/
+*.spec
+
+# ─── Inno Setup output ───────────────────────────────────
+installer_output/
+
+# ─── Velopack ─────────────────────────────────────────────
+Releases/
+
+# ─── Editor / OS junk ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── Logs ─────────────────────────────────────────────────
+*.log# ─── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# ─── Virtual environment ────────────────────────────────
+venv/
+env/
+.venv/
+
+# ─── Secrets / local config ─────────────────────────────
+.env
+*.env.local
+
+# ─── Nuitka build artifacts ──────────────────────────────
+*.build/
+*.dist/
+*.onefile-build/
+*.build.log
+nuitka-crash-report.xml
+
+# ─── PyInstaller build artifacts (if ever used again) ────
+build/
+dist/
+*.spec
+
+# ─── Inno Setup output ───────────────────────────────────
+installer_output/
+
+# ─── Velopack ─────────────────────────────────────────────
+Releases/
+
+# ─── Editor / OS junk ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── Logs ─────────────────────────────────────────────────
+*.log
